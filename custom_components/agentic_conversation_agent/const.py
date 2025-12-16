@@ -23,6 +23,8 @@ CONF_INDEX_HA_SERVICES = "index_ha_services"
 CONF_NARRATE_ACTIONS = "narrate_actions"
 CONF_TTS_SERVICE = "tts_service"
 CONF_TTS_ENTITY = "tts_entity"
+CONF_SHOW_AGENT_ACTIONS_IN_CHAT = "show_agent_actions_in_chat"
+CONF_PROFILE_REQUESTS = "profile_requests"
 
 # Defaults
 DEFAULT_LLM_PROVIDER = "google"
@@ -42,9 +44,14 @@ DEFAULT_INDEX_HA_SERVICES = True
 DEFAULT_NARRATE_ACTIONS = False
 DEFAULT_TTS_SERVICE = "tts.speak"
 DEFAULT_TTS_ENTITY = ""
+DEFAULT_SHOW_AGENT_ACTIONS_IN_CHAT = True
+DEFAULT_PROFILE_REQUESTS = True
 
 # Event fired when agent takes a step (tool call)
 EVENT_AGENT_ACTION = f"{DOMAIN}_action"
+
+# Event fired with timing / profiling data
+EVENT_AGENT_TIMING = f"{DOMAIN}_timing"
 
 # Provider choices
 # Add github_copilot so the UI exposes it as an option

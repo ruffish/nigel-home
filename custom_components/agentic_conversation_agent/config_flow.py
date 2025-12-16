@@ -30,6 +30,8 @@ from .const import (
     CONF_NARRATE_ACTIONS,
     CONF_TTS_SERVICE,
     CONF_TTS_ENTITY,
+    CONF_SHOW_AGENT_ACTIONS_IN_CHAT,
+    CONF_PROFILE_REQUESTS,
     DEFAULT_LLM_MODEL,
     DEFAULT_LLM_PROVIDER,
     DEFAULT_EMBEDDINGS_PROVIDER,
@@ -45,6 +47,8 @@ from .const import (
     DEFAULT_NARRATE_ACTIONS,
     DEFAULT_TTS_SERVICE,
     DEFAULT_TTS_ENTITY,
+    DEFAULT_SHOW_AGENT_ACTIONS_IN_CHAT,
+    DEFAULT_PROFILE_REQUESTS,
     DOMAIN,
     EMBEDDINGS_PROVIDERS,
     LLM_PROVIDERS,
@@ -204,6 +208,16 @@ class AgenticConversationAgentOptionsFlowHandler(config_entries.OptionsFlow):
             self._entry.data.get(CONF_TTS_ENTITY, DEFAULT_TTS_ENTITY),
         )
 
+        current_show_agent_actions_in_chat = self._entry.options.get(
+            CONF_SHOW_AGENT_ACTIONS_IN_CHAT,
+            self._entry.data.get(CONF_SHOW_AGENT_ACTIONS_IN_CHAT, DEFAULT_SHOW_AGENT_ACTIONS_IN_CHAT),
+        )
+
+        current_profile_requests = self._entry.options.get(
+            CONF_PROFILE_REQUESTS,
+            self._entry.data.get(CONF_PROFILE_REQUESTS, DEFAULT_PROFILE_REQUESTS),
+        )
+
         schema = vol.Schema(
             {
                 vol.Required(CONF_LLM_PROVIDER, default=current_provider): vol.In(LLM_PROVIDERS),
@@ -230,6 +244,13 @@ class AgenticConversationAgentOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required(CONF_NARRATE_ACTIONS, default=current_narrate_actions): bool,
                 vol.Optional(CONF_TTS_SERVICE, default=current_tts_service): str,
                 vol.Optional(CONF_TTS_ENTITY, default=current_tts_entity): str,
+
+                # Visual feedback + profiling
+                vol.Required(
+                    CONF_SHOW_AGENT_ACTIONS_IN_CHAT,
+                    default=current_show_agent_actions_in_chat,
+                ): bool,
+                vol.Required(CONF_PROFILE_REQUESTS, default=current_profile_requests): bool,
             }
         )
 

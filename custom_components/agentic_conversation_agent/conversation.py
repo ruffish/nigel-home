@@ -4,6 +4,7 @@ import logging
 import json
 import re
 import time
+from time import perf_counter
 import asyncio
 from typing import TYPE_CHECKING, Any
 
@@ -48,6 +49,8 @@ from .const import (
     CONF_NARRATE_ACTIONS,
     CONF_TTS_SERVICE,
     CONF_TTS_ENTITY,
+    CONF_SHOW_AGENT_ACTIONS_IN_CHAT,
+    CONF_PROFILE_REQUESTS,
     DEFAULT_ALLOW_PYTHON,
     DEFAULT_AGENT_MAX_STEPS,
     DEFAULT_BUFFER_MAX_TURNS,
@@ -58,8 +61,11 @@ from .const import (
     DEFAULT_NARRATE_ACTIONS,
     DEFAULT_TTS_SERVICE,
     DEFAULT_TTS_ENTITY,
+    DEFAULT_SHOW_AGENT_ACTIONS_IN_CHAT,
+    DEFAULT_PROFILE_REQUESTS,
     DOMAIN,
     EVENT_AGENT_ACTION,
+    EVENT_AGENT_TIMING,
 )
 from .embeddings import build_embeddings_provider
 from .llm import LLMClient, LLMConfig
@@ -240,6 +246,12 @@ class AgenticConversationEntity(ConversationEntity):
         self._narrate_actions = bool(cfg.get(CONF_NARRATE_ACTIONS, DEFAULT_NARRATE_ACTIONS))
         self._tts_service = str(cfg.get(CONF_TTS_SERVICE, DEFAULT_TTS_SERVICE) or "").strip()
         self._tts_entity = str(cfg.get(CONF_TTS_ENTITY, DEFAULT_TTS_ENTITY) or "").strip()
+
+        # Visual feedback + profiling
+        self._show_agent_actions_in_chat = bool(
+            cfg.get(CONF_SHOW_AGENT_ACTIONS_IN_CHAT, DEFAULT_SHOW_AGENT_ACTIONS_IN_CHAT)
+        )
+        self._profile_requests = bool(cfg.get(CONF_PROFILE_REQUESTS, DEFAULT_PROFILE_REQUESTS))
 
         try:
             self._embeddings = build_embeddings_provider(
@@ -533,20 +545,23 @@ class AgenticConversationEntity(ConversationEntity):
         if action.lower() == "tool":
             tool_name = str(obj.get("tool") or "").strip()
             args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
+            narration = str(obj.get("narration") or "").strip()
             if tool_name:
-                return {"action": "tool", "tool": tool_name, "args": args}
+                return {"action": "tool", "tool": tool_name, "args": args, "narration": narration}
             return None
 
         # Shorthand: action is the tool name.
         if action and action in self._tool_specs_by_name:
             args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
-            return {"action": "tool", "tool": action, "args": args}
+            narration = str(obj.get("narration") or "").strip()
+            return {"action": "tool", "tool": action, "args": args, "narration": narration}
 
         # Missing action but has tool.
         tool_name = str(obj.get("tool") or "").strip()
         if tool_name and tool_name in self._tool_specs_by_name:
             args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
-            return {"action": "tool", "tool": tool_name, "args": args}
+            narration = str(obj.get("narration") or "").strip()
+            return {"action": "tool", "tool": tool_name, "args": args, "narration": narration}
 
         return None
 
@@ -635,19 +650,69 @@ class AgenticConversationEntity(ConversationEntity):
             },
         )
 
+    def _fire_timing_event(
+        self,
+        *,
+        phase: str,
+        timings_ms: dict[str, float],
+        conversation_id: str,
+        step: int | None = None,
+    ) -> None:
+        if not self._profile_requests:
+            return
+        payload: dict[str, Any] = {
+            "phase": phase,
+            "conversation_id": conversation_id,
+            "timings_ms": timings_ms,
+        }
+        if step is not None:
+            payload["step"] = step
+        self.hass.bus.async_fire(EVENT_AGENT_TIMING, payload)
+
+    def _chat_progress(self, *, chat_log: Any, agent_id: str, text: str) -> None:
+        if not self._show_agent_actions_in_chat:
+            return
+        try:
+            from homeassistant.components.conversation.chat_log import AssistantContent
+
+            chat_log.async_add_assistant_content_without_tools(
+                AssistantContent(agent_id=agent_id, content=text)
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Unable to add progress to chat log", exc_info=True)
+
     async def _async_agent_loop(
         self,
         *,
         ctx: ConversationContext,
         conversation_id: str,
         user_text: str,
+        chat_log: Any,
+        agent_id: str,
     ) -> str:
+        # Push an early progress message so the user sees something even if we are slow
+        self._chat_progress(chat_log=chat_log, agent_id=agent_id, text="Working on that…")
+
+        t0 = perf_counter()
+        timings_ms: dict[str, float] = {}
+
         await self._async_ensure_store()
         await self._async_prune_if_needed()
 
+        t_embed0 = perf_counter()
         query_emb = await self._embeddings.embed(user_text)
+        timings_ms["embed_query"] = (perf_counter() - t_embed0) * 1000.0
+        self._fire_timing_event(phase="embed_query", timings_ms=timings_ms, conversation_id=conversation_id)
+
+        t_mem0 = perf_counter()
         memories = await self._memory.recall(embedding=query_emb, ctx=ctx, top_k=self._memory_top_k)
+        timings_ms["memory_recall"] = (perf_counter() - t_mem0) * 1000.0
+        self._fire_timing_event(phase="memory_recall", timings_ms=timings_ms, conversation_id=conversation_id)
+
+        t_tools0 = perf_counter()
         tools = await self._async_select_tools(query_embedding=query_emb)
+        timings_ms["select_tools"] = (perf_counter() - t_tools0) * 1000.0
+        self._fire_timing_event(phase="select_tools", timings_ms=timings_ms, conversation_id=conversation_id)
 
         # Short-term buffer
         buffer_msgs = await self._buffer.read(ctx=ctx)
@@ -680,7 +745,15 @@ class AgenticConversationEntity(ConversationEntity):
         timeout = aiohttp.ClientTimeout(total=60)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             for _step in range(max(1, self._agent_max_steps)):
+                t_llm0 = perf_counter()
                 raw = await self._llm.generate(system=system, messages=messages)
+                timings_ms[f"llm_generate_s{_step+1}"] = (perf_counter() - t_llm0) * 1000.0
+                self._fire_timing_event(
+                    phase="llm_generate",
+                    timings_ms=timings_ms,
+                    conversation_id=conversation_id,
+                    step=_step + 1,
+                )
                 parsed = _extract_first_json_object(raw) or {}
                 obj = self._normalize_agent_step(parsed)
                 if obj is None:
@@ -701,6 +774,8 @@ class AgenticConversationEntity(ConversationEntity):
                 tool_name = str(obj.get("tool") or "").strip()
                 args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
                 narration = str(obj.get("narration") or "").strip()
+                if not narration:
+                    narration = f"Running {tool_name}"
                 spec = self._tool_specs_by_name.get(tool_name)
                 if spec is None:
                     messages.append(
@@ -721,10 +796,12 @@ class AgenticConversationEntity(ConversationEntity):
                     narration=narration,
                     status="started",
                 )
+                self._chat_progress(chat_log=chat_log, agent_id=agent_id, text=narration)
                 if narration:
                     await self._async_speak_narration(narration)
 
                 try:
+                    t_tool0 = perf_counter()
                     result = await execute_tool(
                         hass=self.hass,
                         tool=spec,
@@ -736,6 +813,7 @@ class AgenticConversationEntity(ConversationEntity):
                         ),
                         memory_write_handler=lambda a: self._async_memory_write_tool(ctx=ctx, args=a),
                     )
+                    timings_ms[f"tool_{tool_name}_s{_step+1}"] = (perf_counter() - t_tool0) * 1000.0
                 except Exception as err:  # noqa: BLE001
                     result = {"ok": False, "error": str(err)}
 
@@ -749,6 +827,13 @@ class AgenticConversationEntity(ConversationEntity):
                     status="completed",
                 )
 
+                self._fire_timing_event(
+                    phase="tool_completed",
+                    timings_ms=timings_ms,
+                    conversation_id=conversation_id,
+                    step=_step + 1,
+                )
+
                 tool_trace.append({"tool": tool_name, "args": args, "narration": narration, "result": result})
                 messages.append(
                     {
@@ -760,6 +845,10 @@ class AgenticConversationEntity(ConversationEntity):
                 )
 
         # If we ran out of steps, provide a concise status.
+        timings_ms["total"] = (perf_counter() - t0) * 1000.0
+        self._fire_timing_event(phase="end", timings_ms=timings_ms, conversation_id=conversation_id)
+        if self._profile_requests:
+            _LOGGER.info("Agent timing (ms): %s", {k: round(v, 1) for k, v in timings_ms.items()})
         if tool_trace:
             return "I started working on that, but ran out of steps. Try asking again more specifically."
         return "Sorry, I couldn't complete that."
@@ -807,6 +896,8 @@ class AgenticConversationEntity(ConversationEntity):
                 ctx=ctx,
                 conversation_id=conversation_id,
                 user_text=user_input.text,
+                chat_log=chat_log,
+                agent_id=user_input.agent_id,
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Agent loop failed")

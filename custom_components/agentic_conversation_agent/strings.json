@@ -48,7 +48,10 @@
 
           "narrate_actions": "Narrate actions (speak what agent is doing)",
           "tts_service": "TTS service (e.g., tts.speak)",
-          "tts_entity": "TTS media player entity"
+          "tts_entity": "TTS media player entity",
+
+          "show_agent_actions_in_chat": "Show agent actions in chat",
+          "profile_requests": "Profile request timing (debug)"
         }
       }
     }
