@@ -104,9 +104,6 @@ class GitHubCopilotCLI:
         """Call GitHub Copilot CLI to get a response."""
         # Build a comprehensive prompt from system + messages
         parts: list[str] = []
-    if provider == "github_copilot":
-        # No API key needed - uses gh CLI authentication
-        return GitHubCopilotCLI(model=model or "gpt-4o")
         if system:
             parts.append(f"System: {system}")
         
@@ -200,4 +197,7 @@ def build_llm_client(*, provider: str, model: str, api_key: str | None, base_url
         if not api_key:
             raise ValueError("LLM api_key is required for Google")
         return GoogleChatLLM(api_key=api_key, model=model)
+    if provider == "github_copilot":
+        # Uses the local Copilot CLI; no API key required
+        return GitHubCopilotCLI(model=model or "gpt-4o")
     raise ValueError(f"Unknown LLM provider: {provider}")

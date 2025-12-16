@@ -1,7 +1,7 @@
 name: Agentic Conversation Agent
 slug: agentic_conversation_agent
 description: "Conversation Agent add-on: LLM + tools + RAG + memory + multi-step reasoning"
-version: 0.1.4
+version: 0.2.17
 url: https://example.invalid/local
 startup: application
 boot: auto
@@ -68,7 +68,7 @@ schema:
   api_key: str?
 
   llm:
-    provider: list(openai|openai_compatible|google)
+    provider: list(openai|openai_compatible|google|github_copilot)
     model: str
     api_key: str?
     base_url: str?
