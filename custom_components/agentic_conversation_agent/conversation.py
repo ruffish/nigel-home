@@ -984,13 +984,25 @@ class AgenticConversationEntity(ConversationEntity):
         Home Assistant passes ChatLog as a separate kwarg; surface it to our handler
         so progress/narration messages show up in the Assist UI during multi-step runs.
         """
-        _LOGGER.info("async_process called: chat_log=%s, kwargs=%s", 
-                     type(chat_log).__name__ if chat_log else None, list(_kwargs.keys()))
-
-        # HA may pass chat_log separately or stash it on the user_input; prefer explicit kwarg.
-        chat = chat_log or getattr(user_input, "chat_log", None)
+        _LOGGER.warning("async_process: chat_log kwarg=%s, all kwargs=%s", 
+                        type(chat_log).__name__ if chat_log else None, list(_kwargs.keys()))
         
-        _LOGGER.info("async_process: resolved chat=%s", type(chat).__name__ if chat else None)
+        # Inspect user_input attributes to find chat_log
+        user_input_attrs = {k: type(v).__name__ for k, v in vars(user_input).items() if not k.startswith('_')}
+        _LOGGER.warning("async_process: user_input attributes=%s", user_input_attrs)
+        
+        # Try all possible sources for chat_log
+        chat = (
+            chat_log 
+            or _kwargs.get("chat_log") 
+            or getattr(user_input, "chat_log", None)
+            or getattr(context, "chat_log", None) if context else None
+        )
+        
+        _LOGGER.warning("async_process: resolved chat=%s from sources: kwarg=%s, user_input=%s",
+                       type(chat).__name__ if chat else None,
+                       chat_log is not None,
+                       hasattr(user_input, "chat_log"))
 
         # Keep signature-compatible with HA even if it adds more params; we only need user_input + chat log.
         return await self._async_handle_message(user_input=user_input, chat_log=chat)
