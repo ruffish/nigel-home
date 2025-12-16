@@ -1,7 +1,7 @@
 name: Agentic Conversation Agent
 slug: agentic_conversation_agent
 description: "Conversation Agent add-on: LLM + tools + RAG + memory + multi-step reasoning"
-version: 0.1.2
+version: 0.1.3
 url: https://example.invalid/local
 startup: application
 boot: auto

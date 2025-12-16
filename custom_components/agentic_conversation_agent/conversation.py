@@ -34,8 +34,13 @@ async def async_setup_entry(
 
 
 class AgenticConversationEntity(ConversationEntity):
-    _attr_supported_languages = "*"
     _attr_supported_features = ConversationEntityFeature.CONTROL
+    _attr_has_entity_name = True
+
+    @property
+    def supported_languages(self) -> list[str] | str:
+        """Return supported languages."""
+        return "*"
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
