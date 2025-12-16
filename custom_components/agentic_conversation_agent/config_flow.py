@@ -26,6 +26,7 @@ from .const import (
     CONF_MEMORY_TOP_K,
     CONF_MEMORY_EXPIRES_DAYS,
     CONF_BUFFER_MAX_TURNS,
+    CONF_INDEX_HA_SERVICES,
     DEFAULT_LLM_MODEL,
     DEFAULT_LLM_PROVIDER,
     DEFAULT_EMBEDDINGS_PROVIDER,
@@ -37,6 +38,7 @@ from .const import (
     DEFAULT_MEMORY_TOP_K,
     DEFAULT_MEMORY_EXPIRES_DAYS,
     DEFAULT_BUFFER_MAX_TURNS,
+    DEFAULT_INDEX_HA_SERVICES,
     DOMAIN,
     EMBEDDINGS_PROVIDERS,
     LLM_PROVIDERS,
@@ -175,6 +177,11 @@ class AgenticConversationAgentOptionsFlowHandler(config_entries.OptionsFlow):
             self._entry.data.get(CONF_BUFFER_MAX_TURNS, DEFAULT_BUFFER_MAX_TURNS),
         )
 
+        current_index_ha_services = self._entry.options.get(
+            CONF_INDEX_HA_SERVICES,
+            self._entry.data.get(CONF_INDEX_HA_SERVICES, DEFAULT_INDEX_HA_SERVICES),
+        )
+
         schema = vol.Schema(
             {
                 vol.Required(CONF_LLM_PROVIDER, default=current_provider): vol.In(LLM_PROVIDERS),
@@ -194,6 +201,7 @@ class AgenticConversationAgentOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required(CONF_MEMORY_TOP_K, default=current_memory_top_k): vol.Coerce(int),
                 vol.Required(CONF_MEMORY_EXPIRES_DAYS, default=current_memory_expires_days): vol.Coerce(int),
                 vol.Required(CONF_BUFFER_MAX_TURNS, default=current_buffer_max_turns): vol.Coerce(int),
+                vol.Required(CONF_INDEX_HA_SERVICES, default=current_index_ha_services): bool,
             }
         )
 

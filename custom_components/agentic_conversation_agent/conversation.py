@@ -50,6 +50,8 @@ from .const import (
     DEFAULT_MEMORY_EXPIRES_DAYS,
     DEFAULT_MEMORY_TOP_K,
     DEFAULT_TOOL_TOP_K,
+    CONF_INDEX_HA_SERVICES,
+    DEFAULT_INDEX_HA_SERVICES,
     DOMAIN,
 )
 from .embeddings import build_embeddings_provider
@@ -221,13 +223,20 @@ class AgenticConversationEntity(ConversationEntity):
         self._memory_expires_days = int(cfg.get(CONF_MEMORY_EXPIRES_DAYS, DEFAULT_MEMORY_EXPIRES_DAYS))
         self._buffer_max_turns = int(cfg.get(CONF_BUFFER_MAX_TURNS, DEFAULT_BUFFER_MAX_TURNS))
         self._tools_dir = str(cfg.get(CONF_TOOLS_DIR, "") or "").strip()
+        self._index_ha_services = bool(cfg.get(CONF_INDEX_HA_SERVICES, DEFAULT_INDEX_HA_SERVICES))
 
-        self._embeddings = build_embeddings_provider(
-            provider=str(cfg.get(CONF_EMBEDDINGS_PROVIDER, "simple")),
-            model=(str(cfg.get(CONF_EMBEDDINGS_MODEL, "")) or None),
-            api_key=(str(cfg.get(CONF_EMBEDDINGS_API_KEY, "")) or None),
-            base_url=(str(cfg.get(CONF_EMBEDDINGS_BASE_URL, "")) or None),
-        )
+        try:
+            self._embeddings = build_embeddings_provider(
+                provider=str(cfg.get(CONF_EMBEDDINGS_PROVIDER, "simple")),
+                model=(str(cfg.get(CONF_EMBEDDINGS_MODEL, "")) or None),
+                api_key=(str(cfg.get(CONF_EMBEDDINGS_API_KEY, "")) or None),
+                base_url=(str(cfg.get(CONF_EMBEDDINGS_BASE_URL, "")) or None),
+            )
+        except Exception:  # noqa: BLE001
+            from .embeddings import SimpleEmbeddings
+
+            _LOGGER.exception("Embeddings provider misconfigured; falling back to local simple embeddings")
+            self._embeddings = SimpleEmbeddings()
 
         # Persistent stores (SQLite) for tool vectors + memory + buffer.
         db_path = hass.config.path(".storage", f"{DOMAIN}.sqlite")
@@ -273,6 +282,14 @@ class AgenticConversationEntity(ConversationEntity):
         if self._tools_dir:
             tools.extend(load_tools_from_dir(self._tools_dir))
 
+        # Index Home Assistant built-in services as ha_service tools for RAG.
+        # This makes "default actions" (what DefaultAgent would do) directly retrievable and callable by the LLM.
+        if self._index_ha_services:
+            try:
+                tools.extend(self._build_service_tools())
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("Failed building HA service tools", exc_info=True)
+
         unique: dict[str, ToolSpec] = {}
         for t in tools:
             unique[t.name] = t
@@ -302,6 +319,62 @@ class AgenticConversationEntity(ConversationEntity):
 
         self._tool_specs_by_name = {t.name: t for t in tools}
         self._tools_indexed = True
+
+    def _build_service_tools(self) -> list[ToolSpec]:
+        services = self.hass.services.async_services()
+        out: list[ToolSpec] = []
+        for domain, svc_map in services.items():
+            for svc, info in svc_map.items():
+                full = f"{domain}.{svc}"
+
+                desc = ""
+                fields: dict[str, Any] = {}
+                if isinstance(info, dict):
+                    d = info.get("description")
+                    if isinstance(d, str):
+                        desc = d.strip()
+                    f = info.get("fields")
+                    if isinstance(f, dict):
+                        fields = f
+
+                props: dict[str, Any] = {}
+                for field_name, field_info in list(fields.items())[:100]:
+                    if not isinstance(field_name, str):
+                        continue
+                    field_desc = ""
+                    if isinstance(field_info, dict):
+                        fd = field_info.get("description")
+                        if isinstance(fd, str):
+                            field_desc = fd
+                    props[field_name] = {"type": "string", "description": field_desc}
+
+                # Allow passing 'target' separately (entity_id/device_id/area_id/label_id).
+                props.setdefault(
+                    "target",
+                    {
+                        "type": "object",
+                        "description": "Optional service target (entity_id, device_id, area_id, label_id)",
+                        "additionalProperties": True,
+                    },
+                )
+
+                args_schema = {
+                    "type": "object",
+                    "properties": props,
+                    "additionalProperties": True,
+                }
+
+                out.append(
+                    ToolSpec(
+                        name=full,
+                        description=desc or f"Call Home Assistant service {full}.",
+                        type="ha_service",
+                        args_schema=args_schema,
+                        raw={"service": full},
+                    )
+                )
+
+        return out
 
     async def _async_timer_finished(self, *, conversation_id: str, ends_at: float) -> None:
         delay = max(0.0, ends_at - time.time())

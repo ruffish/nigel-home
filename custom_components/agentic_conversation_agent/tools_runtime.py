@@ -116,6 +116,7 @@ def builtin_tools() -> list[ToolSpec]:
                 "properties": {
                     "service": {"type": "string", "description": "domain.service"},
                     "data": {"type": "object", "description": "Service data payload"},
+                    "target": {"type": "object", "description": "Optional service target (entity_id, device_id, area_id, label_id)"},
                 },
                 "required": ["service"],
             },
@@ -272,10 +273,11 @@ async def execute_tool(
     if tool.name == "ha_call_service":
         svc = str(args.get("service", ""))
         data = args.get("data") if isinstance(args.get("data"), dict) else {}
+        target = args.get("target") if isinstance(args.get("target"), dict) else None
         if "." not in svc:
             raise ValueError("service must be domain.service")
         domain, service = svc.split(".", 1)
-        await hass.services.async_call(domain, service, data, blocking=True)
+        await hass.services.async_call(domain, service, data, blocking=True, target=target)
         return {"ok": True, "service": svc}
 
     if tool.name == "ha_get_state":
@@ -318,15 +320,19 @@ async def execute_tool(
             raise ValueError(f"Tool '{tool.name}' has invalid service: {svc}")
         domain, service = svc.split(".", 1)
         base_data = tool.raw.get("data") if isinstance(tool.raw.get("data"), dict) else {}
-        target = tool.raw.get("target") if isinstance(tool.raw.get("target"), dict) else {}
+        base_target = tool.raw.get("target") if isinstance(tool.raw.get("target"), dict) else None
 
         payload: dict[str, Any] = {}
         payload.update(base_data)
         payload.update(args or {})
-        if target:
-            payload.update(target)
 
-        await hass.services.async_call(domain, service, payload, blocking=True)
+        call_target = payload.pop("target", None)
+        if not isinstance(call_target, dict):
+            call_target = None
+        if call_target is None:
+            call_target = base_target
+
+        await hass.services.async_call(domain, service, payload, blocking=True, target=call_target)
         return {"ok": True, "service": svc}
 
     if tool.type == "http":

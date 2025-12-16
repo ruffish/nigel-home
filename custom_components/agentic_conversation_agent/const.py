@@ -19,6 +19,7 @@ CONF_TOOL_TOP_K = "tool_top_k"
 CONF_MEMORY_TOP_K = "memory_top_k"
 CONF_MEMORY_EXPIRES_DAYS = "memory_expires_days"
 CONF_BUFFER_MAX_TURNS = "buffer_max_turns"
+CONF_INDEX_HA_SERVICES = "index_ha_services"
 
 # Defaults
 DEFAULT_LLM_PROVIDER = "google"
@@ -34,6 +35,7 @@ DEFAULT_TOOL_TOP_K = 8
 DEFAULT_MEMORY_TOP_K = 5
 DEFAULT_MEMORY_EXPIRES_DAYS = 30
 DEFAULT_BUFFER_MAX_TURNS = 12
+DEFAULT_INDEX_HA_SERVICES = True
 
 # Provider choices
 LLM_PROVIDERS = ["google", "openai", "openai_compatible"]

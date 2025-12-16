@@ -42,7 +42,8 @@
           "tool_top_k": "Top-N tools to show",
           "memory_top_k": "Top-N memories to recall",
           "memory_expires_days": "Memory expiry days (0 = never)",
-          "buffer_max_turns": "Max short-term turns"
+          "buffer_max_turns": "Max short-term turns",
+          "index_ha_services": "Index built-in Home Assistant services"
         }
       }
     }
