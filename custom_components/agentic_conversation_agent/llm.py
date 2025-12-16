@@ -129,12 +129,12 @@ class LLMClient:
             _LOGGER.error("Failed to parse Google response: %s", err)
 
     async def _github_copilot_generate(self, *, system: str, messages: list[dict[str, str]]) -> str:
-        """Call GitHub Copilot CLI to get a response."""
+        """Call GitHub Copilot via HTTP proxy when base_url is set, otherwise shell out to the CLI."""
         # Build a comprehensive prompt from system + messages
         parts: list[str] = []
         if system:
             parts.append(f"System: {system}")
-        
+
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
@@ -144,8 +144,35 @@ class LLMClient:
                 parts.append(f"Assistant: {content}")
             else:
                 parts.append(content)
-        
+
         full_prompt = "\n".join(parts)
+
+        # Prefer an HTTP proxy if provided (e.g., the standalone copilot_server.py).
+        if (self._config.base_url or "").strip():
+            base = str(self._config.base_url).rstrip("/")
+            # If the caller already included /copilot leave it; otherwise append.
+            if not base.endswith("/copilot"):
+                url = f"{base}/copilot"
+            else:
+                url = base
+
+            headers = {"Content-Type": "application/json"}
+            if self._config.api_key:
+                # Optional key passthrough for proxies that enforce auth
+                headers["X-API-Key"] = self._config.api_key
+
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json={"prompt": full_prompt}, headers=headers) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        raise RuntimeError(f"Copilot proxy error ({resp.status}): {error_text[:200]}")
+                    data = await resp.json()
+                    if not data.get("ok"):
+                        raise RuntimeError(str(data.get("error") or "Copilot proxy returned an error"))
+                    text = str(data.get("response", "")).strip()
+                    if text:
+                        return text
 
         def _do() -> str:
             try:
@@ -157,10 +184,10 @@ class LLMClient:
                     timeout=30,
                     check=False,
                 )
-                
+
                 if result.returncode == 0 and result.stdout.strip():
                     return result.stdout.strip()
-                
+
                 # If that fails, try piping to stdin
                 result = subprocess.run(
                     ["copilot"],
@@ -170,16 +197,16 @@ class LLMClient:
                     timeout=30,
                     check=False,
                 )
-                
+
                 if result.returncode == 0 and result.stdout.strip():
                     return result.stdout.strip()
-                
+
                 # Log error if available
                 if result.stderr:
                     _LOGGER.error(f"GitHub Copilot CLI error: {result.stderr}")
-                
+
                 raise RuntimeError(f"GitHub Copilot CLI failed with exit code {result.returncode}")
-                
+
             except FileNotFoundError:
                 _LOGGER.error("GitHub Copilot CLI not found. Make sure 'copilot' command is installed and in PATH")
                 raise RuntimeError("GitHub Copilot CLI not installed. Install from: https://github.com/cli/cli")
@@ -191,10 +218,10 @@ class LLMClient:
                 raise
 
         text = await asyncio.to_thread(_do)
-        
+
         # Clean up the response
         text = text.strip()
-        
+
         # Remove any markdown code fences if present
         if text.startswith("```"):
             text = text.strip("`")
@@ -202,10 +229,8 @@ class LLMClient:
             lines = text.split("\n", 1)
             if len(lines) > 1:
                 text = lines[1]
-        
-        return text
 
-        return ""
+        return text
 
     async def _openai_generate(self, *, system: str, messages: list[dict[str, str]]) -> str:
         """Call OpenAI-compatible API directly via HTTP."""
