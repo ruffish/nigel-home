@@ -47,29 +47,71 @@ class LLMClient:
         user_prompt = "\n".join(parts)
 
         # Google Gemini API endpoint
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._config.model}:generateContent"
+        # Accept either "gemini-2.5-flash" or "models/gemini-2.5-flash" (and strip any accidental ":..." suffix).
+        model = (self._config.model or "").strip()
+        if model.startswith("models/"):
+            model = model[len("models/") :]
+        if ":" in model:
+            model = model.split(":", 1)[0]
 
-        payload = {
-            "contents": [{"parts": [{"text": user_prompt}]}],
-            "systemInstruction": {"parts": [{"text": system}]},
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 1024,
-            },
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+        generation_config = {
+            "temperature": 0.7,
+            "maxOutputTokens": 1024,
         }
 
-        headers = {"Content-Type": "application/json"}
-        params = {"key": self._config.api_key}
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "systemInstruction": {"parts": [{"text": system}]},
+            "generationConfig": generation_config,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            # Prefer documented auth header; avoids query-string auth being blocked in some environments.
+            "x-goog-api-key": self._config.api_key,
+        }
+        params = None
 
         timeout = aiohttp.ClientTimeout(total=60)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload, headers=headers, params=params) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    _LOGGER.error("Google API error (%s): %s", resp.status, error_text)
-                    raise RuntimeError(f"Google API error ({resp.status}): {error_text[:200]}")
 
-                data = await resp.json()
+                    # Some models (notably certain Gemma endpoints) do not allow developer/system instruction.
+                    # If so, retry once by embedding the system prompt into the user content.
+                    if (
+                        resp.status == 400
+                        and "Developer instruction is not enabled" in error_text
+                        and system.strip()
+                    ):
+                        fallback_text = f"{system.strip()}\n\n{user_prompt}".strip()
+                        fallback_payload = {
+                            "contents": [{"role": "user", "parts": [{"text": fallback_text}]}],
+                            "generationConfig": generation_config,
+                        }
+                        async with session.post(
+                            url, json=fallback_payload, headers=headers, params=params
+                        ) as resp2:
+                            if resp2.status != 200:
+                                error_text2 = await resp2.text()
+                                _LOGGER.error(
+                                    "Google API error (%s): %s", resp2.status, error_text2
+                                )
+                                raise RuntimeError(
+                                    f"Google API error ({resp2.status}): {error_text2[:200]}"
+                                )
+
+                            data = await resp2.json()
+                    else:
+                        _LOGGER.error("Google API error (%s): %s", resp.status, error_text)
+                        raise RuntimeError(
+                            f"Google API error ({resp.status}): {error_text[:200]}"
+                        )
+                else:
+                    data = await resp.json()
 
         # Extract text from response
         try:
