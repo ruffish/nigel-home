@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -39,6 +40,53 @@ SYSTEM_PROMPT = """You are a helpful Home Assistant voice assistant named Nigel.
 You help users control their smart home and answer questions.
 Be concise and friendly. If you don't know something, say so.
 When the user asks to control devices, explain what you would do (you don't have direct device control yet)."""
+
+
+ROUTER_PROMPT = """You are an AI assistant for Home Assistant.
+
+You can either:
+1) Ask Home Assistant to handle the request (device control, timers, queries about entity states), OR
+2) Respond normally (general questions / chit-chat).
+
+Output MUST be STRICT JSON only (no markdown, no extra text), matching ONE of:
+
+{ "action": "hass" }
+  - Use this when Home Assistant should execute/answer via its built-in assistant capabilities.
+
+{ "action": "final", "final_text": "..." }
+  - Use this when you should answer directly.
+
+Guidance:
+- For commands like "start a 5 minute timer", "turn on the kitchen lights", "how long left on my timer", choose action=hass.
+- Only choose action=final for questions that aren't about the home.
+"""
+
+
+def _extract_first_json_object(text: str) -> dict[str, Any] | None:
+    """Best-effort extraction of the first JSON object from model output."""
+    if not text:
+        return None
+
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : idx + 1]
+                try:
+                    obj = json.loads(candidate)
+                except Exception:
+                    return None
+                return obj if isinstance(obj, dict) else None
+
+    return None
 
 
 async def async_setup_entry(
@@ -82,33 +130,6 @@ class AgenticConversationEntity(ConversationEntity):
         user_input: ConversationInput,
         chat_log: Any,
     ) -> ConversationResult:
-        # 1) Prefer Home Assistant's built-in intent engine for device control.
-        # This keeps timers/lights/etc working the same as the default Assist agent.
-        try:
-            from homeassistant.components.conversation.default_agent import DefaultAgent
-
-            domain_data = self.hass.data.setdefault(DOMAIN, {})
-            default_agent = domain_data.get("_ha_default_agent")
-            if default_agent is None:
-                default_agent = DefaultAgent(self.hass)
-                domain_data["_ha_default_agent"] = default_agent
-
-            intent_result = await default_agent._async_handle_message(user_input, chat_log)
-            # If the default agent couldn't match any intent, fall back to the LLM.
-            if (
-                intent_result is not None
-                and intent_result.response is not None
-                and not (
-                    getattr(intent_result.response, "response_type", None)
-                    == ha_intent.IntentResponseType.ERROR
-                    and getattr(intent_result.response, "error_code", None)
-                    == ha_intent.IntentResponseErrorCode.NO_INTENT_MATCH
-                )
-            ):
-                return intent_result
-        except Exception:  # noqa: BLE001
-            _LOGGER.debug("Default agent handling failed; falling back to LLM", exc_info=True)
-
         conversation_id = getattr(user_input, "conversation_id", None) or "default"
 
         # Get or create conversation history
@@ -125,16 +146,55 @@ class AgenticConversationEntity(ConversationEntity):
             history = history[-10:]
             self._history[conversation_id] = history
 
+        # Let the LLM decide whether to call Home Assistant (tools/intents) or answer directly.
         try:
-            # Call LLM
-            response_text = await self._llm.generate(
-                system=SYSTEM_PROMPT,
-                messages=history,
-            )
-            response_text = response_text.strip() or "Sorry, I couldn't generate a response."
-        except Exception as err:
-            _LOGGER.exception("LLM call failed")
-            response_text = f"Sorry, I encountered an error: {err}"
+            router_raw = await self._llm.generate(system=ROUTER_PROMPT, messages=history)
+            router = _extract_first_json_object(router_raw) or {}
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Router call failed; defaulting to hass", exc_info=True)
+            router = {"action": "hass"}
+
+        action = str(router.get("action", "")).strip().lower()
+
+        if action == "hass":
+            try:
+                from homeassistant.components.conversation.default_agent import DefaultAgent
+
+                domain_data = self.hass.data.setdefault(DOMAIN, {})
+                default_agent = domain_data.get("_ha_default_agent")
+                if default_agent is None:
+                    default_agent = DefaultAgent(self.hass)
+                    domain_data["_ha_default_agent"] = default_agent
+
+                result = await default_agent._async_handle_message(user_input, chat_log)
+
+                # Mirror the speech into our in-memory history so follow-ups have context.
+                try:
+                    speech = result.response.speech.get("plain", {}).get("speech", "")
+                except Exception:
+                    speech = ""
+                if speech:
+                    history.append({"role": "assistant", "content": speech})
+
+                return result
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("Home Assistant action handling failed")
+                response_text = f"Sorry, I couldn't execute that in Home Assistant: {err}"
+        else:
+            response_text = str(router.get("final_text") or "").strip()
+            if not response_text:
+                # Fall back to a normal LLM reply if the router returned an invalid schema.
+                try:
+                    response_text = await self._llm.generate(
+                        system=SYSTEM_PROMPT,
+                        messages=history,
+                    )
+                    response_text = response_text.strip()
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.exception("LLM call failed")
+                    response_text = f"Sorry, I encountered an error: {err}"
+
+        response_text = response_text.strip() or "Sorry, I couldn't generate a response."
 
         # Add assistant response to history
         history.append({"role": "assistant", "content": response_text})
