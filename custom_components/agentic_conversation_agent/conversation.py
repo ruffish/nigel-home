@@ -7,7 +7,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from homeassistant.components import intent
+try:
+    # Home Assistant 2024+ (and current) location
+    from homeassistant.helpers.intent import IntentResponse
+except ImportError:  # pragma: no cover
+    # Older HA versions (best-effort fallback)
+    from homeassistant.components.intent import IntentResponse  # type: ignore[attr-defined]
 from homeassistant.components.conversation import (
     ConversationEntity,
     ConversationEntityFeature,
@@ -116,7 +121,7 @@ class AgenticConversationEntity(ConversationEntity):
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Unable to add to chat log", exc_info=True)
 
-        response = intent.IntentResponse(language=user_input.language)
+        response = IntentResponse(language=user_input.language)
         response.async_set_speech(response_text)
 
         return ConversationResult(
