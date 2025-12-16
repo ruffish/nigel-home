@@ -41,9 +41,9 @@ options:
   # Embeddings provider for RAG (tools + memory)
   embeddings:
     provider: simple
-    model: ""
+    model: ""      # for ollama, e.g. "nomic-embed-text"
     api_key: ""
-    base_url: ""  # only used for openai_compatible
+    base_url: ""  # openai_compatible: endpoint base URL; ollama: http://ollama:11434
 
   rag:
     tools_top_n: 8
@@ -74,7 +74,7 @@ schema:
     base_url: str?
 
   embeddings:
-    provider: list(openai|openai_compatible|google|simple)
+    provider: list(openai|openai_compatible|google|ollama|simple)
     model: str?
     api_key: str?
     base_url: str?

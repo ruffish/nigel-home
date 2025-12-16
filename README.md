@@ -28,3 +28,10 @@ Drop tool definition files into the add-on's `/data/tools` directory (shown as t
 - `python`: run a Python script in the add-on container
 
 See `docs/tool_schema.md`.
+
+## Local embeddings + local DB
+
+- **Vector database**: stored locally inside the add-on at `/data/agent.db` (SQLite).
+- **Embeddings**:
+	- `embeddings.provider: simple` is fully local (deterministic) and requires no external services.
+	- For **local AI embeddings**, set `embeddings.provider: ollama` and point `embeddings.base_url` to your local Ollama instance (for the HA Ollama add-on, `http://ollama:11434` is a common default) and choose a model like `nomic-embed-text`.

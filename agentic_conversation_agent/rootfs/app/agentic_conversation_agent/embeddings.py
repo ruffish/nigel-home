@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
+import aiohttp
 from openai import OpenAI
 
 try:
@@ -98,8 +99,31 @@ def build_embeddings_provider(*, provider: str, model: str | None, api_key: str 
     provider = (provider or "simple").lower()
     if provider == "simple":
         return SimpleEmbeddings()
+    if provider == "ollama":
+        return OllamaEmbeddings(base_url=base_url or "http://ollama:11434", model=model or "nomic-embed-text")
     if provider in {"openai", "openai_compatible"}:
         return OpenAIEmbeddings(api_key=api_key or "", model=model or "", base_url=base_url)
     if provider == "google":
         return GoogleEmbeddings(api_key=api_key or "", model=model or "models/text-embedding-004")
     raise ValueError(f"Unknown embeddings provider: {provider}")
+
+
+@dataclass(frozen=True)
+class OllamaEmbeddings:
+    base_url: str
+    model: str
+
+    async def embed(self, text: str) -> list[float]:
+        url = self.base_url.rstrip("/") + "/api/embeddings"
+        payload = {"model": self.model, "prompt": text}
+
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status >= 300:
+                    raise RuntimeError(f"Ollama embeddings failed ({resp.status}): {data}")
+        emb = data.get("embedding")
+        if not isinstance(emb, list):
+            raise RuntimeError("Ollama embeddings response missing 'embedding'")
+        return [float(x) for x in emb]
