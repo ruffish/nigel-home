@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -90,6 +91,102 @@ class GoogleChatLLM:
             text = text.strip("`")
             if text.lower().startswith("json"):
                 text = text[4:].lstrip()
+        return safe_json_loads(text)
+
+
+@dataclass(frozen=True)
+class GitHubCopilotCLI:
+    """Use GitHub Copilot CLI as the LLM backend."""
+    
+    model: str = "gpt-4o"  # Model is informational; gh copilot uses your subscription
+
+    async def next_action(self, *, system: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+        """Call GitHub Copilot CLI to get a response."""
+        # Build a comprehensive prompt from system + messages
+        parts: list[str] = []
+    if provider == "github_copilot":
+        # No API key needed - uses gh CLI authentication
+        return GitHubCopilotCLI(model=model or "gpt-4o")
+        if system:
+            parts.append(f"System: {system}")
+        
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                parts.append(f"User: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+            else:
+                parts.append(content)
+        
+        full_prompt = "\n".join(parts)
+        
+        # Add explicit JSON formatting instruction
+        full_prompt += "\n\nRespond in valid JSON format only."
+
+        def _do() -> str:
+            try:
+                # Use GitHub Copilot CLI with -i flag for inline prompt
+                result = subprocess.run(
+                    ["copilot", "-i", full_prompt],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+                
+                # If that fails, try piping to stdin
+                result = subprocess.run(
+                    ["copilot"],
+                    input=full_prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+                
+                # Log error if available
+                if result.stderr:
+                    _LOGGER.error(f"GitHub Copilot CLI error: {result.stderr}")
+                
+                raise RuntimeError(f"GitHub Copilot CLI failed with exit code {result.returncode}")
+                
+            except FileNotFoundError:
+                _LOGGER.error("GitHub Copilot CLI not found. Make sure 'copilot' command is installed and in PATH")
+                raise RuntimeError("GitHub Copilot CLI not installed. Install from: https://github.com/cli/cli")
+            except subprocess.TimeoutExpired:
+                _LOGGER.error("GitHub Copilot CLI timed out")
+                raise RuntimeError("GitHub Copilot CLI timeout")
+            except Exception as e:
+                _LOGGER.error(f"GitHub Copilot CLI error: {e}")
+                raise
+
+        text = await asyncio.to_thread(_do)
+        
+        # Clean up the response - gh copilot may add formatting
+        text = text.strip()
+        
+        # Remove any markdown code fences
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:].lstrip()
+        
+        # Try to find JSON in the response if it's embedded in text
+        if not text.startswith("{"):
+            # Look for JSON object in the text
+            start_idx = text.find("{")
+            end_idx = text.rfind("}")
+            if start_idx != -1 and end_idx != -1:
+                text = text[start_idx:end_idx + 1]
+        
         return safe_json_loads(text)
 
 

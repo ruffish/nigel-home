@@ -1,7 +1,7 @@
 name: Agentic Conversation Agent
 slug: agentic_conversation_agent
 description: "Conversation Agent add-on: LLM + tools + RAG + memory + multi-step reasoning"
-version: 0.1.3
+version: 0.1.4
 url: https://example.invalid/local
 startup: application
 boot: auto
@@ -33,8 +33,8 @@ options:
 
   # LLM provider
   llm:
-    provider: google
-    model: gemini-1.5-flash
+    provider: github_copilot
+    model: gpt-5-mini
     api_key: ""
     base_url: ""  # only used for openai_compatible
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
+import asyncio
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +30,8 @@ class LLMClient:
             return await self._google_generate(system=system, messages=messages)
         if provider in {"openai", "openai_compatible"}:
             return await self._openai_generate(system=system, messages=messages)
+        if provider == "github_copilot":
+            return await self._github_copilot_generate(system=system, messages=messages)
 
         raise ValueError(f"Unknown LLM provider: {provider}")
 
@@ -123,6 +127,83 @@ class LLMClient:
                     return str(parts[0].get("text", ""))
         except Exception as err:
             _LOGGER.error("Failed to parse Google response: %s", err)
+
+    async def _github_copilot_generate(self, *, system: str, messages: list[dict[str, str]]) -> str:
+        """Call GitHub Copilot CLI to get a response."""
+        # Build a comprehensive prompt from system + messages
+        parts: list[str] = []
+        if system:
+            parts.append(f"System: {system}")
+        
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                parts.append(f"User: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+            else:
+                parts.append(content)
+        
+        full_prompt = "\n".join(parts)
+
+        def _do() -> str:
+            try:
+                # Use GitHub Copilot CLI with -i flag for inline prompt
+                result = subprocess.run(
+                    ["copilot", "-i", full_prompt],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+                
+                # If that fails, try piping to stdin
+                result = subprocess.run(
+                    ["copilot"],
+                    input=full_prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+                
+                # Log error if available
+                if result.stderr:
+                    _LOGGER.error(f"GitHub Copilot CLI error: {result.stderr}")
+                
+                raise RuntimeError(f"GitHub Copilot CLI failed with exit code {result.returncode}")
+                
+            except FileNotFoundError:
+                _LOGGER.error("GitHub Copilot CLI not found. Make sure 'copilot' command is installed and in PATH")
+                raise RuntimeError("GitHub Copilot CLI not installed. Install from: https://github.com/cli/cli")
+            except subprocess.TimeoutExpired:
+                _LOGGER.error("GitHub Copilot CLI timed out")
+                raise RuntimeError("GitHub Copilot CLI timeout")
+            except Exception as e:
+                _LOGGER.error(f"GitHub Copilot CLI error: {e}")
+                raise
+
+        text = await asyncio.to_thread(_do)
+        
+        # Clean up the response
+        text = text.strip()
+        
+        # Remove any markdown code fences if present
+        if text.startswith("```"):
+            text = text.strip("`")
+            # Skip language identifier if present
+            lines = text.split("\n", 1)
+            if len(lines) > 1:
+                text = lines[1]
+        
+        return text
 
         return ""
 
