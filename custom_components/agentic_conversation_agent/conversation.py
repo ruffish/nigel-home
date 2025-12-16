@@ -929,3 +929,25 @@ class AgenticConversationEntity(ConversationEntity):
             response=response,
             continue_conversation=False,
         )
+
+    async def async_process(
+        self,
+        user_input: ConversationInput,
+        *,
+        conversation_id: str | None = None,
+        context: Any | None = None,
+        language: str | None = None,
+        chat_log: Any | None = None,
+        **_kwargs: Any,
+    ) -> ConversationResult:
+        """Handle a conversation turn.
+
+        Home Assistant passes ChatLog as a separate kwarg; surface it to our handler
+        so progress/narration messages show up in the Assist UI during multi-step runs.
+        """
+
+        # HA may pass chat_log separately or stash it on the user_input; prefer explicit kwarg.
+        chat = chat_log or getattr(user_input, "chat_log", None)
+
+        # Keep signature-compatible with HA even if it adds more params; we only need user_input + chat log.
+        return await self._async_handle_message(user_input=user_input, chat_log=chat)
