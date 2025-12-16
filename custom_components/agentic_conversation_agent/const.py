@@ -38,6 +38,7 @@ DEFAULT_BUFFER_MAX_TURNS = 12
 DEFAULT_INDEX_HA_SERVICES = True
 
 # Provider choices
-LLM_PROVIDERS = ["google", "openai", "openai_compatible"]
+# Add github_copilot so the UI exposes it as an option
+LLM_PROVIDERS = ["google", "openai", "openai_compatible", "github_copilot"]
 
 EMBEDDINGS_PROVIDERS = ["simple", "ollama", "openai", "openai_compatible", "google"]

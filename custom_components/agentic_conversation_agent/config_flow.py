@@ -57,8 +57,10 @@ class AgenticConversationAgentConfigFlow(config_entries.ConfigFlow, domain=DOMAI
         errors = {}
 
         if user_input is not None:
-            # Validate API key is provided
-            if not user_input.get(CONF_LLM_API_KEY):
+            # Validate API key only for providers that require it
+            provider = user_input.get(CONF_LLM_PROVIDER, DEFAULT_LLM_PROVIDER)
+            api_key = user_input.get(CONF_LLM_API_KEY, "")
+            if provider != "github_copilot" and not api_key:
                 errors[CONF_LLM_API_KEY] = "api_key_required"
             else:
                 return self.async_create_entry(
@@ -77,7 +79,8 @@ class AgenticConversationAgentConfigFlow(config_entries.ConfigFlow, domain=DOMAI
                 vol.Optional(CONF_NAME, default="Agentic Conversation Agent"): str,
                 vol.Required(CONF_LLM_PROVIDER, default=DEFAULT_LLM_PROVIDER): vol.In(LLM_PROVIDERS),
                 vol.Required(CONF_LLM_MODEL, default=DEFAULT_LLM_MODEL): str,
-                vol.Required(CONF_LLM_API_KEY): str,
+                # Make API key optional at schema level; we validate conditionally above
+                vol.Optional(CONF_LLM_API_KEY, default=""): str,
                 vol.Optional(CONF_LLM_BASE_URL, default=""): str,
             }
         )
@@ -186,7 +189,8 @@ class AgenticConversationAgentOptionsFlowHandler(config_entries.OptionsFlow):
             {
                 vol.Required(CONF_LLM_PROVIDER, default=current_provider): vol.In(LLM_PROVIDERS),
                 vol.Required(CONF_LLM_MODEL, default=current_model): str,
-                vol.Required(CONF_LLM_API_KEY, default=current_api_key): str,
+            # Optional to support github_copilot which doesn't need a key
+            vol.Optional(CONF_LLM_API_KEY, default=current_api_key): str,
                 vol.Optional(CONF_LLM_BASE_URL, default=current_base_url): str,
 
                 vol.Required(CONF_EMBEDDINGS_PROVIDER, default=current_embeddings_provider): vol.In(EMBEDDINGS_PROVIDERS),
