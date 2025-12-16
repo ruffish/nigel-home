@@ -33,9 +33,30 @@ from .const import (
     CONF_LLM_BASE_URL,
     CONF_LLM_MODEL,
     CONF_LLM_PROVIDER,
+    CONF_EMBEDDINGS_API_KEY,
+    CONF_EMBEDDINGS_BASE_URL,
+    CONF_EMBEDDINGS_MODEL,
+    CONF_EMBEDDINGS_PROVIDER,
+    CONF_TOOLS_DIR,
+    CONF_ALLOW_PYTHON,
+    CONF_AGENT_MAX_STEPS,
+    CONF_TOOL_TOP_K,
+    CONF_MEMORY_TOP_K,
+    CONF_MEMORY_EXPIRES_DAYS,
+    CONF_BUFFER_MAX_TURNS,
+    DEFAULT_ALLOW_PYTHON,
+    DEFAULT_AGENT_MAX_STEPS,
+    DEFAULT_BUFFER_MAX_TURNS,
+    DEFAULT_MEMORY_EXPIRES_DAYS,
+    DEFAULT_MEMORY_TOP_K,
+    DEFAULT_TOOL_TOP_K,
     DOMAIN,
 )
+from .embeddings import build_embeddings_provider
 from .llm import LLMClient, LLMConfig
+from .memory_runtime import BufferStore, ConversationContext, MemoryManager, expiry_timestamp
+from .tools_runtime import ToolSpec, builtin_tools, execute_tool, load_tools_from_dir, tool_prompt_block
+from .vector_store import VectorStoreSQLite
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,24 +66,31 @@ Be concise and friendly. If you don't know something, say so.
 When the user asks to control devices, explain what you would do (you don't have direct device control yet)."""
 
 
-ROUTER_PROMPT = """You are an AI assistant for Home Assistant.
+AGENT_PROMPT = """You are Nigel, a Home Assistant voice assistant.
 
-You can either:
-1) Ask Home Assistant to handle the request (device control, timers, queries about entity states), OR
-2) Respond normally (general questions / chit-chat).
+You can call tools to control the home and fetch state.
 
-Output MUST be STRICT JSON only (no markdown, no extra text), matching ONE of:
+Tool calling rules:
+- Output MUST be STRICT JSON only (no markdown, no extra text).
+- Choose exactly one action per step.
 
-{ "action": "hass" }
-  - Use this when Home Assistant should execute/answer via its built-in assistant capabilities.
+Valid outputs:
 
+1) Call a tool:
+{ "action": "tool", "tool": "<tool_name>", "args": { ... } }
+
+2) Finish:
 { "action": "final", "final_text": "..." }
-  - Use this when you should answer directly.
 
 Guidance:
-- For commands like "start a 5 minute timer", "turn on the kitchen lights", "how long left on my timer", choose action=hass.
-- Only choose action=final for questions that aren't about the home.
+- For device control use ha_call_service or a matching ha_service tool.
+- To find an entity_id, use ha_find_entities; then ha_get_state.
+- For timers when the client device_id is missing, use local_timer.
+- Only call memory_write when the user explicitly asked you to remember something.
 """
+
+
+ROUTER_PROMPT = """(Deprecated)"""
 
 
 def _extract_first_json_object(text: str) -> dict[str, Any] | None:
@@ -179,12 +207,95 @@ class AgenticConversationEntity(ConversationEntity):
         )
         self._llm = LLMClient(self._llm_config)
 
-        # Simple conversation history (in-memory)
-        self._history: dict[str, list[dict[str, str]]] = {}
+        # Agentic configuration
+        self._allow_python = bool(cfg.get(CONF_ALLOW_PYTHON, DEFAULT_ALLOW_PYTHON))
+        self._agent_max_steps = int(cfg.get(CONF_AGENT_MAX_STEPS, DEFAULT_AGENT_MAX_STEPS))
+        self._tool_top_k = int(cfg.get(CONF_TOOL_TOP_K, DEFAULT_TOOL_TOP_K))
+        self._memory_top_k = int(cfg.get(CONF_MEMORY_TOP_K, DEFAULT_MEMORY_TOP_K))
+        self._memory_expires_days = int(cfg.get(CONF_MEMORY_EXPIRES_DAYS, DEFAULT_MEMORY_EXPIRES_DAYS))
+        self._buffer_max_turns = int(cfg.get(CONF_BUFFER_MAX_TURNS, DEFAULT_BUFFER_MAX_TURNS))
+        self._tools_dir = str(cfg.get(CONF_TOOLS_DIR, "") or "").strip()
+
+        self._embeddings = build_embeddings_provider(
+            provider=str(cfg.get(CONF_EMBEDDINGS_PROVIDER, "simple")),
+            model=(str(cfg.get(CONF_EMBEDDINGS_MODEL, "")) or None),
+            api_key=(str(cfg.get(CONF_EMBEDDINGS_API_KEY, "")) or None),
+            base_url=(str(cfg.get(CONF_EMBEDDINGS_BASE_URL, "")) or None),
+        )
+
+        # Persistent stores (SQLite) for tool vectors + memory + buffer.
+        db_path = hass.config.path(".storage", f"{DOMAIN}.sqlite")
+        self._store = VectorStoreSQLite(hass=hass, db_path=db_path)
+        self._store_ready = False
+        self._memory = MemoryManager(store=self._store)
+        self._buffer = BufferStore(store=self._store)
+
+        self._tool_specs_by_name: dict[str, ToolSpec] = {}
+        self._tools_indexed = False
 
         # Simple in-integration timers (for clients that don't provide a device_id).
         # Keyed by conversation_id.
         self._timers: dict[str, dict[str, float]] = {}
+
+        self._last_prune_ts = 0.0
+
+    async def _async_ensure_store(self) -> None:
+        if self._store_ready:
+            return
+        await self._store.async_setup()
+        self._store_ready = True
+
+    async def _async_prune_if_needed(self) -> None:
+        now = time.time()
+        if now - self._last_prune_ts < 3600:
+            return
+        self._last_prune_ts = now
+        try:
+            await self._memory.prune()
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Memory prune failed", exc_info=True)
+
+    async def _async_index_tools(self) -> None:
+        if self._tools_indexed:
+            return
+
+        await self._async_ensure_store()
+
+        # Load tools (built-in + optional user-defined)
+        tools: list[ToolSpec] = []
+        tools.extend(builtin_tools())
+        if self._tools_dir:
+            tools.extend(load_tools_from_dir(self._tools_dir))
+
+        unique: dict[str, ToolSpec] = {}
+        for t in tools:
+            unique[t.name] = t
+        tools = list(unique.values())
+
+        # Rebuild tool index prefix each startup.
+        await self._store.delete_prefix(kind="tool", prefix="tool:")
+
+        for t in tools:
+            text = f"{t.name}: {t.description}\nargs_schema: {json.dumps(t.args_schema, ensure_ascii=False)}"
+            try:
+                emb = await self._embeddings.embed(text)
+            except Exception:  # noqa: BLE001
+                # If embeddings provider is misconfigured, fall back to local simple embeddings.
+                from .embeddings import SimpleEmbeddings
+
+                emb = await SimpleEmbeddings().embed(text)
+
+            await self._store.upsert(
+                item_id=f"tool:{t.name}",
+                kind="tool",
+                text=text,
+                embedding=emb,
+                metadata={"name": t.name, "type": t.type},
+                expires_at=None,
+            )
+
+        self._tool_specs_by_name = {t.name: t for t in tools}
+        self._tools_indexed = True
 
     async def _async_timer_finished(self, *, conversation_id: str, ends_at: float) -> None:
         delay = max(0.0, ends_at - time.time())
@@ -261,6 +372,175 @@ class AgenticConversationEntity(ConversationEntity):
 
         return None
 
+    async def _async_local_timer_tool(self, *, conversation_id: str, args: dict[str, Any]) -> dict[str, Any]:
+        action = str(args.get("action", "")).strip().lower()
+        if action not in {"start", "cancel", "remaining"}:
+            raise ValueError("local_timer.action must be start/cancel/remaining")
+
+        if action == "cancel":
+            if conversation_id in self._timers:
+                self._timers.pop(conversation_id, None)
+                return {"ok": True, "message": "Canceled."}
+            return {"ok": False, "message": "No active timer."}
+
+        if action == "remaining":
+            timer = self._timers.get(conversation_id)
+            if not timer:
+                return {"ok": False, "message": "No active timer."}
+            ends_at = float(timer.get("ends_at", 0.0))
+            remaining = int(round(ends_at - time.time()))
+            return {"ok": True, "remaining_seconds": max(0, remaining)}
+
+        seconds = int(args.get("seconds") or 0)
+        if seconds <= 0:
+            raise ValueError("local_timer.seconds must be > 0")
+        now = time.time()
+        ends_at = now + seconds
+        self._timers[conversation_id] = {
+            "started_at": now,
+            "ends_at": ends_at,
+            "seconds": float(seconds),
+        }
+        self.hass.async_create_task(
+            self._async_timer_finished(conversation_id=conversation_id, ends_at=ends_at)
+        )
+        return {"ok": True, "ends_at": ends_at, "seconds": seconds}
+
+    async def _async_memory_write_tool(self, *, ctx: ConversationContext, args: dict[str, Any]) -> dict[str, Any]:
+        text = str(args.get("text", "")).strip()
+        if not text:
+            raise ValueError("memory_write.text is required")
+        expires_days = args.get("expires_days")
+        if expires_days is None or expires_days == "":
+            expires_days_i = self._memory_expires_days
+        else:
+            expires_days_i = int(expires_days)
+
+        emb = await self._embeddings.embed(text)
+        item_id = await self._memory.remember(
+            embedding=emb,
+            text=text,
+            ctx=ctx,
+            expires_at=expiry_timestamp(days=expires_days_i),
+        )
+        return {"ok": True, "memory_id": item_id}
+
+    async def _async_select_tools(self, *, query_embedding: list[float]) -> list[ToolSpec]:
+        await self._async_index_tools()
+        hits = await self._store.query(kind="tool", query_embedding=query_embedding, top_k=self._tool_top_k)
+        selected: list[ToolSpec] = []
+        for item, _score in hits:
+            name = str(item.metadata.get("name") or "")
+            spec = self._tool_specs_by_name.get(name)
+            if spec is not None:
+                selected.append(spec)
+        # Ensure builtins exist even if similarity is low.
+        for t in builtin_tools():
+            if t.name not in {x.name for x in selected}:
+                selected.append(t)
+        return selected
+
+    async def _async_agent_loop(
+        self,
+        *,
+        ctx: ConversationContext,
+        conversation_id: str,
+        user_text: str,
+    ) -> str:
+        await self._async_ensure_store()
+        await self._async_prune_if_needed()
+
+        query_emb = await self._embeddings.embed(user_text)
+        memories = await self._memory.recall(embedding=query_emb, ctx=ctx, top_k=self._memory_top_k)
+        tools = await self._async_select_tools(query_embedding=query_emb)
+
+        # Short-term buffer
+        buffer_msgs = await self._buffer.read(ctx=ctx)
+        if len(buffer_msgs) > self._buffer_max_turns * 2:
+            # Best-effort cap. Keep newest turns.
+            buffer_msgs = buffer_msgs[-(self._buffer_max_turns * 2) :]
+
+        tools_block = tool_prompt_block(tools)
+        memory_block = "\n".join(f"- {m}" for m in memories)
+
+        system = (
+            f"{AGENT_PROMPT}\n\n"
+            f"Available tools:\n{tools_block}\n\n"
+            f"Relevant memories:\n{memory_block if memory_block else '- (none)'}\n"
+        )
+
+        # Build working messages for the LLM.
+        messages: list[dict[str, str]] = []
+        for m in buffer_msgs:
+            role = str(m.get("role") or "")
+            if role in {"user", "assistant"}:
+                messages.append({"role": role, "content": str(m.get("content") or "")})
+        if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != user_text:
+            messages.append({"role": "user", "content": user_text})
+
+        tool_trace: list[dict[str, Any]] = []
+
+        import aiohttp
+
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for _step in range(max(1, self._agent_max_steps)):
+                raw = await self._llm.generate(system=system, messages=messages)
+                obj = _extract_first_json_object(raw) or {}
+                action = str(obj.get("action", "")).strip().lower()
+
+                if action == "final":
+                    final_text = str(obj.get("final_text") or "").strip()
+                    return final_text or "Sorry, I couldn't generate a response."
+
+                if action != "tool":
+                    # If the model violated the schema, fall back to a direct answer.
+                    return (raw or "").strip() or "Sorry, I couldn't generate a response."
+
+                tool_name = str(obj.get("tool") or "").strip()
+                args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
+                spec = self._tool_specs_by_name.get(tool_name)
+                if spec is None:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {"tool_error": f"Unknown tool '{tool_name}'"}, ensure_ascii=False
+                            ),
+                        }
+                    )
+                    continue
+
+                try:
+                    result = await execute_tool(
+                        hass=self.hass,
+                        tool=spec,
+                        args=args,
+                        allow_python=self._allow_python,
+                        session=session,
+                        local_timer_handler=lambda a: self._async_local_timer_tool(
+                            conversation_id=conversation_id, args=a
+                        ),
+                        memory_write_handler=lambda a: self._async_memory_write_tool(ctx=ctx, args=a),
+                    )
+                except Exception as err:  # noqa: BLE001
+                    result = {"ok": False, "error": str(err)}
+
+                tool_trace.append({"tool": tool_name, "args": args, "result": result})
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {"tool": tool_name, "result": result}, ensure_ascii=False
+                        ),
+                    }
+                )
+
+        # If we ran out of steps, provide a concise status.
+        if tool_trace:
+            return "I started working on that, but ran out of steps. Try asking again more specifically."
+        return "Sorry, I couldn't complete that."
+
     async def _async_handle_message(
         self,
         user_input: ConversationInput,
@@ -268,47 +548,45 @@ class AgenticConversationEntity(ConversationEntity):
     ) -> ConversationResult:
         conversation_id = getattr(user_input, "conversation_id", None) or "default"
 
-        # Get or create conversation history
-        if conversation_id not in self._history:
-            self._history[conversation_id] = []
+        ctx = ConversationContext(
+            speaker=None,
+            device_id=getattr(user_input, "device_id", None),
+            user_id=getattr(getattr(user_input, "context", None), "user_id", None),
+            conversation_id=getattr(user_input, "conversation_id", None),
+            language=getattr(user_input, "language", None),
+        )
 
-        history = self._history[conversation_id]
-
-        # Add user message to history
-        history.append({"role": "user", "content": user_input.text})
-
-        # Keep only last 10 messages
-        if len(history) > 10:
-            history = history[-10:]
-            self._history[conversation_id] = history
-
-        # Let the LLM decide whether to call Home Assistant (tools/intents) or answer directly.
+        # Persist into buffer before generating the answer.
         try:
-            router_raw = await self._llm.generate(system=ROUTER_PROMPT, messages=history)
-            router = _extract_first_json_object(router_raw) or {}
+            await self._async_ensure_store()
+            await self._buffer.append(ctx=ctx, role="user", content=user_input.text)
         except Exception:  # noqa: BLE001
-            _LOGGER.debug("Router call failed; defaulting to hass", exc_info=True)
-            router = {"action": "hass"}
+            _LOGGER.debug("Failed writing buffer", exc_info=True)
 
-        action = str(router.get("action", "")).strip().lower()
-
-        if action == "hass":
-            # Local fallback for timers when the client doesn't provide a device_id.
-            # The built-in timer intent expects a device that supports timers.
-            if user_input.device_id is None and _looks_like_timer_request(user_input.text):
-                local_timer_response = await self._async_handle_timer_locally(
-                    conversation_id=conversation_id, text=user_input.text
+        # If device_id is missing and the request looks like a timer, keep the old heuristic fallback.
+        if user_input.device_id is None and _looks_like_timer_request(user_input.text):
+            local_timer_response = await self._async_handle_timer_locally(
+                conversation_id=conversation_id, text=user_input.text
+            )
+            if local_timer_response is not None:
+                response_text = local_timer_response
+                response = IntentResponse(language=user_input.language)
+                response.async_set_speech(response_text)
+                return ConversationResult(
+                    conversation_id=conversation_id,
+                    response=response,
+                    continue_conversation=False,
                 )
-                if local_timer_response is not None:
-                    response_text = local_timer_response
-                    response = IntentResponse(language=user_input.language)
-                    response.async_set_speech(response_text)
-                    return ConversationResult(
-                        conversation_id=conversation_id,
-                        response=response,
-                        continue_conversation=False,
-                    )
 
+        # Primary path: agent loop (tools + memory)
+        try:
+            response_text = await self._async_agent_loop(
+                ctx=ctx,
+                conversation_id=conversation_id,
+                user_text=user_input.text,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("Agent loop failed; falling back to HA DefaultAgent")
             try:
                 from homeassistant.components.conversation.default_agent import DefaultAgent
 
@@ -319,37 +597,21 @@ class AgenticConversationEntity(ConversationEntity):
                     domain_data["_ha_default_agent"] = default_agent
 
                 result = await default_agent._async_handle_message(user_input, chat_log)
-
-                # Mirror the speech into our in-memory history so follow-ups have context.
                 try:
-                    speech = result.response.speech.get("plain", {}).get("speech", "")
+                    response_text = result.response.speech.get("plain", {}).get("speech", "")
                 except Exception:
-                    speech = ""
-                if speech:
-                    history.append({"role": "assistant", "content": speech})
-
-                return result
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.exception("Home Assistant action handling failed")
-                response_text = f"Sorry, I couldn't execute that in Home Assistant: {err}"
-        else:
-            response_text = str(router.get("final_text") or "").strip()
-            if not response_text:
-                # Fall back to a normal LLM reply if the router returned an invalid schema.
-                try:
-                    response_text = await self._llm.generate(
-                        system=SYSTEM_PROMPT,
-                        messages=history,
-                    )
-                    response_text = response_text.strip()
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.exception("LLM call failed")
-                    response_text = f"Sorry, I encountered an error: {err}"
+                    response_text = ""
+                response_text = response_text.strip() or f"Sorry, I couldn't complete that: {err}"
+            except Exception:
+                response_text = f"Sorry, I couldn't complete that: {err}"
 
         response_text = response_text.strip() or "Sorry, I couldn't generate a response."
 
-        # Add assistant response to history
-        history.append({"role": "assistant", "content": response_text})
+        # Persist assistant response into buffer
+        try:
+            await self._buffer.append(ctx=ctx, role="assistant", content=response_text)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Failed writing buffer", exc_info=True)
 
         # Add to chat log
         try:

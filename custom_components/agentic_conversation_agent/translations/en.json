@@ -29,7 +29,20 @@
           "llm_provider": "LLM Provider",
           "llm_model": "Model name",
           "llm_api_key": "API Key",
-          "llm_base_url": "Base URL (optional, for OpenAI-compatible)"
+          "llm_base_url": "Base URL (optional, for OpenAI-compatible)",
+
+          "embeddings_provider": "Embeddings provider",
+          "embeddings_model": "Embeddings model (optional)",
+          "embeddings_api_key": "Embeddings API key (optional)",
+          "embeddings_base_url": "Embeddings base URL (optional)",
+
+          "tools_dir": "Tools directory (optional)",
+          "allow_python": "Allow Python tools",
+          "agent_max_steps": "Max tool steps per request",
+          "tool_top_k": "Top-N tools to show",
+          "memory_top_k": "Top-N memories to recall",
+          "memory_expires_days": "Memory expiry days (0 = never)",
+          "buffer_max_turns": "Max short-term turns"
         }
       }
     }
