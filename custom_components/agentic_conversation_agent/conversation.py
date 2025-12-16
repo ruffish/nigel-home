@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -20,9 +18,21 @@ from homeassistant.components.conversation import (
 if TYPE_CHECKING:
     from homeassistant.components.conversation.chat_log import ChatLog
 
-from .const import CONF_API_KEY, CONF_BASE_URL, CONF_TIMEOUT, DOMAIN
+from .const import (
+    CONF_LLM_API_KEY,
+    CONF_LLM_BASE_URL,
+    CONF_LLM_MODEL,
+    CONF_LLM_PROVIDER,
+    DOMAIN,
+)
+from .llm import LLMClient, LLMConfig
 
 _LOGGER = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = """You are a helpful Home Assistant voice assistant named Nigel.
+You help users control their smart home and answer questions.
+Be concise and friendly. If you don't know something, say so.
+When the user asks to control devices, explain what you would do (you don't have direct device control yet)."""
 
 
 async def async_setup_entry(
@@ -47,63 +57,69 @@ class AgenticConversationEntity(ConversationEntity):
         self._entry = entry
         self._attr_name = entry.data.get("name") or "Agentic Conversation Agent"
         self._attr_unique_id = f"{entry.entry_id}"
-        self._base_url = str(entry.data.get(CONF_BASE_URL) or "")
-        self._api_key = str(entry.data.get(CONF_API_KEY) or "")
-        self._timeout = int(entry.data.get(CONF_TIMEOUT) or 30)
+
+        # LLM configuration
+        self._llm_config = LLMConfig(
+            provider=str(entry.data.get(CONF_LLM_PROVIDER, "google")),
+            model=str(entry.data.get(CONF_LLM_MODEL, "gemini-1.5-flash")),
+            api_key=str(entry.data.get(CONF_LLM_API_KEY, "")),
+            base_url=entry.data.get(CONF_LLM_BASE_URL) or None,
+        )
+        self._llm = LLMClient(self._llm_config)
+
+        # Simple conversation history (in-memory)
+        self._history: dict[str, list[dict[str, str]]] = {}
 
     async def _async_handle_message(
         self,
         user_input: ConversationInput,
         chat_log: Any,
     ) -> ConversationResult:
-        device_id = getattr(user_input, "device_id", None)
-        language = getattr(user_input, "language", None)
-        conversation_id = getattr(user_input, "conversation_id", None)
+        conversation_id = getattr(user_input, "conversation_id", None) or "default"
 
-        speaker = None
+        # Get or create conversation history
+        if conversation_id not in self._history:
+            self._history[conversation_id] = []
+
+        history = self._history[conversation_id]
+
+        # Add user message to history
+        history.append({"role": "user", "content": user_input.text})
+
+        # Keep only last 10 messages
+        if len(history) > 10:
+            history = history[-10:]
+            self._history[conversation_id] = history
+
         try:
-            speaker = getattr(user_input.context, "user_id", None)
-        except Exception:  # noqa: BLE001
-            speaker = None
+            # Call LLM
+            response_text = await self._llm.generate(
+                system=SYSTEM_PROMPT,
+                messages=history,
+            )
+            response_text = response_text.strip() or "Sorry, I couldn't generate a response."
+        except Exception as err:
+            _LOGGER.exception("LLM call failed")
+            response_text = f"Sorry, I encountered an error: {err}"
 
-        payload = {
-            "text": user_input.text,
-            "language": language,
-            "conversation_id": conversation_id,
-            "device_id": device_id,
-            "speaker": speaker,
-            "user_id": speaker,
-        }
-
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["X-API-Key"] = self._api_key
-
-        url = self._base_url.rstrip("/") + "/converse"
-
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=payload, headers=headers) as resp:
-                data = await resp.json(content_type=None)
-
-        text = str(data.get("text", "")).strip() or "Sorry, I couldn't generate a response."
+        # Add assistant response to history
+        history.append({"role": "assistant", "content": response_text})
 
         # Add to chat log
         try:
             from homeassistant.components.conversation.chat_log import AssistantContent
 
             chat_log.async_add_assistant_content_without_tools(
-                AssistantContent(agent_id=user_input.agent_id, content=text)
+                AssistantContent(agent_id=user_input.agent_id, content=response_text)
             )
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Unable to add to chat log", exc_info=True)
 
         response = intent.IntentResponse(language=user_input.language)
-        response.async_set_speech(text)
+        response.async_set_speech(response_text)
 
         return ConversationResult(
-            conversation_id=data.get("conversation_id"),
+            conversation_id=conversation_id,
             response=response,
-            continue_conversation=bool(data.get("continue_conversation", False)),
+            continue_conversation=False,
         )

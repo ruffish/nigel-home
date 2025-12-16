@@ -3,14 +3,18 @@
     "step": {
       "user": {
         "title": "Agentic Conversation Agent",
-        "description": "Connect Home Assistant Assist to the Agentic Conversation Agent add-on.",
+        "description": "Configure the LLM that powers your conversation agent.",
         "data": {
           "name": "Name",
-          "base_url": "Add-on base URL",
-          "api_key": "API key (optional)",
-          "timeout": "Timeout (seconds)"
+          "llm_provider": "LLM Provider",
+          "llm_model": "Model name",
+          "llm_api_key": "API Key",
+          "llm_base_url": "Base URL (optional, for OpenAI-compatible)"
         }
       }
+    },
+    "error": {
+      "api_key_required": "API key is required"
     },
     "abort": {
       "single_instance_allowed": "Only one instance is allowed."

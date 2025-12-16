@@ -1,8 +1,15 @@
 DOMAIN = "agentic_conversation_agent"
 
-CONF_BASE_URL = "base_url"
-CONF_API_KEY = "api_key"
-CONF_TIMEOUT = "timeout"
+# Config keys
+CONF_LLM_PROVIDER = "llm_provider"
+CONF_LLM_MODEL = "llm_model"
+CONF_LLM_API_KEY = "llm_api_key"
+CONF_LLM_BASE_URL = "llm_base_url"
 
-DEFAULT_BASE_URL = "http://agentic_conversation_agent:8099"
-DEFAULT_TIMEOUT = 30
+# Defaults
+DEFAULT_LLM_PROVIDER = "google"
+DEFAULT_LLM_MODEL = "gemini-1.5-flash"
+DEFAULT_TIMEOUT = 60
+
+# Provider choices
+LLM_PROVIDERS = ["google", "openai", "openai_compatible"]
