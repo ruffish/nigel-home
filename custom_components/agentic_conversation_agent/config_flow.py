@@ -27,6 +27,9 @@ from .const import (
     CONF_MEMORY_EXPIRES_DAYS,
     CONF_BUFFER_MAX_TURNS,
     CONF_INDEX_HA_SERVICES,
+    CONF_NARRATE_ACTIONS,
+    CONF_TTS_SERVICE,
+    CONF_TTS_ENTITY,
     DEFAULT_LLM_MODEL,
     DEFAULT_LLM_PROVIDER,
     DEFAULT_EMBEDDINGS_PROVIDER,
@@ -39,6 +42,9 @@ from .const import (
     DEFAULT_MEMORY_EXPIRES_DAYS,
     DEFAULT_BUFFER_MAX_TURNS,
     DEFAULT_INDEX_HA_SERVICES,
+    DEFAULT_NARRATE_ACTIONS,
+    DEFAULT_TTS_SERVICE,
+    DEFAULT_TTS_ENTITY,
     DOMAIN,
     EMBEDDINGS_PROVIDERS,
     LLM_PROVIDERS,
@@ -185,6 +191,19 @@ class AgenticConversationAgentOptionsFlowHandler(config_entries.OptionsFlow):
             self._entry.data.get(CONF_INDEX_HA_SERVICES, DEFAULT_INDEX_HA_SERVICES),
         )
 
+        current_narrate_actions = self._entry.options.get(
+            CONF_NARRATE_ACTIONS,
+            self._entry.data.get(CONF_NARRATE_ACTIONS, DEFAULT_NARRATE_ACTIONS),
+        )
+        current_tts_service = self._entry.options.get(
+            CONF_TTS_SERVICE,
+            self._entry.data.get(CONF_TTS_SERVICE, DEFAULT_TTS_SERVICE),
+        )
+        current_tts_entity = self._entry.options.get(
+            CONF_TTS_ENTITY,
+            self._entry.data.get(CONF_TTS_ENTITY, DEFAULT_TTS_ENTITY),
+        )
+
         schema = vol.Schema(
             {
                 vol.Required(CONF_LLM_PROVIDER, default=current_provider): vol.In(LLM_PROVIDERS),
@@ -206,6 +225,11 @@ class AgenticConversationAgentOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required(CONF_MEMORY_EXPIRES_DAYS, default=current_memory_expires_days): vol.Coerce(int),
                 vol.Required(CONF_BUFFER_MAX_TURNS, default=current_buffer_max_turns): vol.Coerce(int),
                 vol.Required(CONF_INDEX_HA_SERVICES, default=current_index_ha_services): bool,
+
+                # Narration / TTS options
+                vol.Required(CONF_NARRATE_ACTIONS, default=current_narrate_actions): bool,
+                vol.Optional(CONF_TTS_SERVICE, default=current_tts_service): str,
+                vol.Optional(CONF_TTS_ENTITY, default=current_tts_entity): str,
             }
         )
 

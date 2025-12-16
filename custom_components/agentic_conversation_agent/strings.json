@@ -44,7 +44,11 @@
           "memory_top_k": "Top-N memories to recall",
           "memory_expires_days": "Memory expiry days (0 = never)",
           "buffer_max_turns": "Max short-term turns",
-          "index_ha_services": "Index built-in Home Assistant services"
+          "index_ha_services": "Index built-in Home Assistant services",
+
+          "narrate_actions": "Narrate actions (speak what agent is doing)",
+          "tts_service": "TTS service (e.g., tts.speak)",
+          "tts_entity": "TTS media player entity"
         }
       }
     }

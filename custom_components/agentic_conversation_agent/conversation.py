@@ -44,15 +44,22 @@ from .const import (
     CONF_MEMORY_TOP_K,
     CONF_MEMORY_EXPIRES_DAYS,
     CONF_BUFFER_MAX_TURNS,
+    CONF_INDEX_HA_SERVICES,
+    CONF_NARRATE_ACTIONS,
+    CONF_TTS_SERVICE,
+    CONF_TTS_ENTITY,
     DEFAULT_ALLOW_PYTHON,
     DEFAULT_AGENT_MAX_STEPS,
     DEFAULT_BUFFER_MAX_TURNS,
     DEFAULT_MEMORY_EXPIRES_DAYS,
     DEFAULT_MEMORY_TOP_K,
     DEFAULT_TOOL_TOP_K,
-    CONF_INDEX_HA_SERVICES,
     DEFAULT_INDEX_HA_SERVICES,
+    DEFAULT_NARRATE_ACTIONS,
+    DEFAULT_TTS_SERVICE,
+    DEFAULT_TTS_ENTITY,
     DOMAIN,
+    EVENT_AGENT_ACTION,
 )
 from .embeddings import build_embeddings_provider
 from .llm import LLMClient, LLMConfig
@@ -83,10 +90,14 @@ Tool calling rules:
 Valid outputs:
 
 1) Call a tool:
-{ "action": "tool", "tool": "<tool_name>", "args": { ... } }
+{ "action": "tool", "tool": "<tool_name>", "args": { ... }, "narration": "Brief spoken description of what you're doing" }
 
 2) Finish:
 { "action": "final", "final_text": "..." }
+
+The "narration" field is REQUIRED when action is "tool". It should be a short, natural phrase
+that can be spoken aloud to tell the user what you're doing (e.g., "Turning off the bedroom lights",
+"Playing music on YouTube", "Checking the temperature").
 
 Guidance:
 - If you are unsure what service exists or which fields it needs, call ha_list_services.
@@ -224,6 +235,11 @@ class AgenticConversationEntity(ConversationEntity):
         self._buffer_max_turns = int(cfg.get(CONF_BUFFER_MAX_TURNS, DEFAULT_BUFFER_MAX_TURNS))
         self._tools_dir = str(cfg.get(CONF_TOOLS_DIR, "") or "").strip()
         self._index_ha_services = bool(cfg.get(CONF_INDEX_HA_SERVICES, DEFAULT_INDEX_HA_SERVICES))
+
+        # Narration / TTS configuration
+        self._narrate_actions = bool(cfg.get(CONF_NARRATE_ACTIONS, DEFAULT_NARRATE_ACTIONS))
+        self._tts_service = str(cfg.get(CONF_TTS_SERVICE, DEFAULT_TTS_SERVICE) or "").strip()
+        self._tts_entity = str(cfg.get(CONF_TTS_ENTITY, DEFAULT_TTS_ENTITY) or "").strip()
 
         try:
             self._embeddings = build_embeddings_provider(
@@ -568,6 +584,57 @@ class AgenticConversationEntity(ConversationEntity):
                 selected.append(t)
         return selected
 
+    async def _async_speak_narration(self, narration: str) -> None:
+        """Speak a narration via the configured TTS service."""
+        if not self._narrate_actions or not narration:
+            return
+        if not self._tts_entity:
+            _LOGGER.debug("Narration enabled but no TTS entity configured")
+            return
+
+        try:
+            # Parse service call (e.g. "tts.speak" -> domain=tts, service=speak)
+            svc = self._tts_service or "tts.speak"
+            if "." in svc:
+                domain, service = svc.split(".", 1)
+            else:
+                domain, service = "tts", svc
+
+            await self.hass.services.async_call(
+                domain,
+                service,
+                {
+                    "entity_id": self._tts_entity,
+                    "message": narration,
+                },
+                blocking=True,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Failed to speak narration: %s", narration, exc_info=True)
+
+    def _fire_action_event(
+        self,
+        *,
+        step: int,
+        tool_name: str,
+        args: dict[str, Any],
+        narration: str,
+        result: dict[str, Any] | None = None,
+        status: str = "started",
+    ) -> None:
+        """Fire an event so frontends can display agent actions."""
+        self.hass.bus.async_fire(
+            EVENT_AGENT_ACTION,
+            {
+                "step": step,
+                "tool": tool_name,
+                "args": args,
+                "narration": narration,
+                "result": result,
+                "status": status,  # "started" or "completed"
+            },
+        )
+
     async def _async_agent_loop(
         self,
         *,
@@ -633,6 +700,7 @@ class AgenticConversationEntity(ConversationEntity):
 
                 tool_name = str(obj.get("tool") or "").strip()
                 args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
+                narration = str(obj.get("narration") or "").strip()
                 spec = self._tool_specs_by_name.get(tool_name)
                 if spec is None:
                     messages.append(
@@ -644,6 +712,17 @@ class AgenticConversationEntity(ConversationEntity):
                         }
                     )
                     continue
+
+                # Fire event and speak narration BEFORE executing tool
+                self._fire_action_event(
+                    step=_step + 1,
+                    tool_name=tool_name,
+                    args=args,
+                    narration=narration,
+                    status="started",
+                )
+                if narration:
+                    await self._async_speak_narration(narration)
 
                 try:
                     result = await execute_tool(
@@ -660,7 +739,17 @@ class AgenticConversationEntity(ConversationEntity):
                 except Exception as err:  # noqa: BLE001
                     result = {"ok": False, "error": str(err)}
 
-                tool_trace.append({"tool": tool_name, "args": args, "result": result})
+                # Fire event after tool completes
+                self._fire_action_event(
+                    step=_step + 1,
+                    tool_name=tool_name,
+                    args=args,
+                    narration=narration,
+                    result=result,
+                    status="completed",
+                )
+
+                tool_trace.append({"tool": tool_name, "args": args, "narration": narration, "result": result})
                 messages.append(
                     {
                         "role": "assistant",
