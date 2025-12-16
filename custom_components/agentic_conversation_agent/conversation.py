@@ -216,12 +216,6 @@ class AgenticConversationEntity(ConversationEntity):
         """Return supported languages."""
         return "*"
 
-    def __getattribute__(self, name: str) -> Any:
-        """Log all method calls to trace what HA is invoking."""
-        if name.startswith("async_") and not name.startswith("async_add"):
-            _LOGGER.warning("Method called: %s", name)
-        return super().__getattribute__(name)
-
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self._entry = entry
@@ -676,22 +670,17 @@ class AgenticConversationEntity(ConversationEntity):
         self.hass.bus.async_fire(EVENT_AGENT_TIMING, payload)
 
     def _chat_progress(self, *, chat_log: Any, agent_id: str, text: str) -> None:
-        if not self._show_agent_actions_in_chat:
-            _LOGGER.debug("_chat_progress: skipping (show_agent_actions_in_chat=False)")
+        """Add progress message to chat_log if available (unused in current HA version)."""
+        if not self._show_agent_actions_in_chat or not chat_log:
             return
-        if not chat_log:
-            _LOGGER.warning("_chat_progress: chat_log is None, cannot add message: %s", text)
-            return
-        _LOGGER.info("_chat_progress: adding text=%s", text)
         try:
             from homeassistant.components.conversation.chat_log import AssistantContent
 
             chat_log.async_add_assistant_content_without_tools(
                 AssistantContent(agent_id=agent_id, content=text)
             )
-            _LOGGER.info("_chat_progress: successfully added to chat_log")
         except Exception:  # noqa: BLE001
-            _LOGGER.exception("Unable to add progress to chat log")
+            _LOGGER.debug("Unable to add progress to chat log", exc_info=True)
 
     def _chat_tool_marker(self, *, chat_log: Any, agent_id: str, tool_name: str) -> None:
         """Add a tool marker message to the chat log (non-spoken)."""
@@ -708,10 +697,6 @@ class AgenticConversationEntity(ConversationEntity):
         agent_id: str,
     ) -> tuple[str, list[str]]:
         """Run agent loop and return (final_text, action_log)."""
-        # Debug: confirm chat_log is passed
-        _LOGGER.info("AGENT LOOP START: chat_log=%s, agent_id=%s, show_actions=%s", 
-                     type(chat_log).__name__ if chat_log else None, agent_id, self._show_agent_actions_in_chat)
-        
         action_log: list[str] = []  # Track all tool calls for display
         
         t0 = perf_counter()
@@ -891,7 +876,6 @@ class AgenticConversationEntity(ConversationEntity):
         user_input: ConversationInput,
         chat_log: Any,
     ) -> ConversationResult:
-        _LOGGER.warning("_async_handle_message called: chat_log=%s", type(chat_log).__name__ if chat_log else None)
         conversation_id = getattr(user_input, "conversation_id", None) or "default"
 
         ctx = ConversationContext(
@@ -986,25 +970,13 @@ class AgenticConversationEntity(ConversationEntity):
         Home Assistant passes ChatLog as a separate kwarg; surface it to our handler
         so progress/narration messages show up in the Assist UI during multi-step runs.
         """
-        _LOGGER.warning("async_process: chat_log kwarg=%s, all kwargs=%s", 
-                        type(chat_log).__name__ if chat_log else None, list(_kwargs.keys()))
-        
-        # Inspect user_input attributes to find chat_log
-        user_input_attrs = {k: type(v).__name__ for k, v in vars(user_input).items() if not k.startswith('_')}
-        _LOGGER.warning("async_process: user_input attributes=%s", user_input_attrs)
-        
-        # Try all possible sources for chat_log
+        # Try all possible sources for chat_log (though it appears to be None in this HA version)
         chat = (
             chat_log 
             or _kwargs.get("chat_log") 
             or getattr(user_input, "chat_log", None)
             or getattr(context, "chat_log", None) if context else None
         )
-        
-        _LOGGER.warning("async_process: resolved chat=%s from sources: kwarg=%s, user_input=%s",
-                       type(chat).__name__ if chat else None,
-                       chat_log is not None,
-                       hasattr(user_input, "chat_log"))
 
         # Keep signature-compatible with HA even if it adds more params; we only need user_input + chat log.
         return await self._async_handle_message(user_input=user_input, chat_log=chat)
