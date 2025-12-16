@@ -1,0 +1,5 @@
+#!/usr/bin/with-contenv bashio
+
+bashio::log.info "Starting Agentic Conversation Agent server"
+
+exec python3 -m agentic_conversation_agent.server

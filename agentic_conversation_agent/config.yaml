@@ -1,0 +1,96 @@
+name: Agentic Conversation Agent
+slug: agentic_conversation_agent
+description: "Conversation Agent add-on: LLM + tools + RAG + memory + multi-step reasoning"
+version: 0.1.0
+url: https://example.invalid/local
+startup: application
+boot: auto
+init: false
+arch:
+  - amd64
+  - aarch64
+  - armv7
+  - armhf
+  - i386
+
+# Home Assistant add-on privileges
+homeassistant_api: true
+hassio_api: true
+
+# Network
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: Agent API (used by the custom integration)
+
+options:
+  log_level: info
+  listen_host: 0.0.0.0
+  listen_port: 8099
+
+  # If set, incoming requests must include X-API-Key.
+  api_key: ""
+
+  # LLM provider
+  llm:
+    provider: google
+    model: gemini-1.5-flash
+    api_key: ""
+    base_url: ""  # only used for openai_compatible
+
+  # Embeddings provider for RAG (tools + memory)
+  embeddings:
+    provider: simple
+    model: ""
+    api_key: ""
+    base_url: ""  # only used for openai_compatible
+
+  rag:
+    tools_top_n: 8
+
+  agent:
+    max_steps: 6
+
+  memory:
+    top_k: 5
+    buffer_max_turns: 12
+    expiry_days_default: 30
+    summarization_model: ""  # default: llm.model
+
+  tools:
+    dir: /data/tools
+    allow_python: false
+
+schema:
+  log_level: list(trace|debug|info|warning|error|critical)
+  listen_host: str
+  listen_port: port
+  api_key: str?
+
+  llm:
+    provider: list(openai|openai_compatible|google)
+    model: str
+    api_key: str?
+    base_url: str?
+
+  embeddings:
+    provider: list(openai|openai_compatible|google|simple)
+    model: str?
+    api_key: str?
+    base_url: str?
+
+  rag:
+    tools_top_n: int(1,50)
+
+  agent:
+    max_steps: int(1,20)
+
+  memory:
+    top_k: int(0,20)
+    buffer_max_turns: int(1,200)
+    expiry_days_default: int(1,3650)
+    summarization_model: str?
+
+  tools:
+    dir: str
+    allow_python: bool

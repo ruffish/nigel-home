@@ -1,0 +1,14 @@
+name: lights_kitchen_on
+description: Turn on the kitchen lights.
+type: ha_service
+service: light.turn_on
+target:
+  entity_id: light.kitchen
+args_schema:
+  type: object
+  properties:
+    brightness_pct:
+      type: integer
+      minimum: 1
+      maximum: 100
+  additionalProperties: false

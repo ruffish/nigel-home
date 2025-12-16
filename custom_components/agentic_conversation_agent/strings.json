@@ -1,0 +1,21 @@
+{
+  "title": "Agentic Conversation Agent",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Agentic Conversation Agent",
+        "description": "Connect Home Assistant Assist to the Agentic Conversation Agent add-on.",
+        "data": {
+          "name": "Name",
+          "base_url": "Add-on base URL",
+          "api_key": "API key (optional)",
+          "timeout": "Timeout (seconds)"
+        }
+      }
+    },
+    "error": {},
+    "abort": {
+      "single_instance_allowed": "Only one instance is allowed."
+    }
+  }
+}

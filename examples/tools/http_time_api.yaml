@@ -1,0 +1,9 @@
+name: world_time
+description: Get current time for a timezone using worldtimeapi.org.
+type: http
+method: GET
+url: https://worldtimeapi.org/api/timezone/Etc/UTC
+args_schema:
+  type: object
+  properties: {}
+  additionalProperties: false
