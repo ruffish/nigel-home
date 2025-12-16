@@ -249,7 +249,7 @@ class AgenticConversationEntity(ConversationEntity):
         self._tools_indexed = False
 
         # Simple in-integration timers (for clients that don't provide a device_id).
-        # Keyed by conversation_id.
+        # Keyed by a stable timer key (conversation_id/user_id/device_id).
         self._timers: dict[str, dict[str, float]] = {}
 
         self._last_prune_ts = 0.0
@@ -398,21 +398,31 @@ class AgenticConversationEntity(ConversationEntity):
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Unable to create persistent notification for timer", exc_info=True)
 
+    def _timer_key(self, *, ctx: ConversationContext, conversation_id: str | None) -> str:
+        if conversation_id:
+            return f"cid:{conversation_id}"
+        if ctx.user_id:
+            return f"user:{ctx.user_id}"
+        if ctx.device_id:
+            return f"device:{ctx.device_id}"
+        return "default"
+
     async def _async_handle_timer_locally(
-        self, *, conversation_id: str, text: str
+        self, *, ctx: ConversationContext, conversation_id: str | None, text: str
     ) -> str | None:
+        timer_key = self._timer_key(ctx=ctx, conversation_id=conversation_id)
         kind = _timer_intent_kind(text)
         if kind is None:
             return None
 
         if kind == "cancel":
-            if conversation_id in self._timers:
-                self._timers.pop(conversation_id, None)
+            if timer_key in self._timers:
+                self._timers.pop(timer_key, None)
                 return "Okay, canceled your timer."
             return "You don't have an active timer."
 
         if kind == "remaining":
-            timer = self._timers.get(conversation_id)
+            timer = self._timers.get(timer_key)
             if not timer:
                 return "You don't have an active timer."
 
@@ -433,13 +443,13 @@ class AgenticConversationEntity(ConversationEntity):
 
             now = time.time()
             ends_at = now + seconds
-            self._timers[conversation_id] = {
+            self._timers[timer_key] = {
                 "started_at": now,
                 "ends_at": ends_at,
                 "seconds": float(seconds),
             }
             self.hass.async_create_task(
-                self._async_timer_finished(conversation_id=conversation_id, ends_at=ends_at)
+                self._async_timer_finished(conversation_id=timer_key, ends_at=ends_at)
             )
 
             mins, secs = divmod(seconds, 60)
@@ -451,19 +461,22 @@ class AgenticConversationEntity(ConversationEntity):
 
         return None
 
-    async def _async_local_timer_tool(self, *, conversation_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    async def _async_local_timer_tool(
+        self, *, ctx: ConversationContext, conversation_id: str | None, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        timer_key = self._timer_key(ctx=ctx, conversation_id=conversation_id)
         action = str(args.get("action", "")).strip().lower()
         if action not in {"start", "cancel", "remaining"}:
             raise ValueError("local_timer.action must be start/cancel/remaining")
 
         if action == "cancel":
-            if conversation_id in self._timers:
-                self._timers.pop(conversation_id, None)
+            if timer_key in self._timers:
+                self._timers.pop(timer_key, None)
                 return {"ok": True, "message": "Canceled."}
             return {"ok": False, "message": "No active timer."}
 
         if action == "remaining":
-            timer = self._timers.get(conversation_id)
+            timer = self._timers.get(timer_key)
             if not timer:
                 return {"ok": False, "message": "No active timer."}
             ends_at = float(timer.get("ends_at", 0.0))
@@ -475,15 +488,51 @@ class AgenticConversationEntity(ConversationEntity):
             raise ValueError("local_timer.seconds must be > 0")
         now = time.time()
         ends_at = now + seconds
-        self._timers[conversation_id] = {
+        self._timers[timer_key] = {
             "started_at": now,
             "ends_at": ends_at,
             "seconds": float(seconds),
         }
         self.hass.async_create_task(
-            self._async_timer_finished(conversation_id=conversation_id, ends_at=ends_at)
+            self._async_timer_finished(conversation_id=timer_key, ends_at=ends_at)
         )
         return {"ok": True, "ends_at": ends_at, "seconds": seconds}
+
+    def _normalize_agent_step(self, obj: dict[str, Any]) -> dict[str, Any] | None:
+        """Normalize model output to {action: tool/final, ...}.
+
+        Accepts common schema variants, including:
+        - {"action":"tool","tool":"name","args":{...}}
+        - {"action":"final","final_text":"..."}
+        - {"action":"<tool_name>","args":{...}}  (shorthand)
+        - {"tool":"name","args":{...}}          (missing action)
+        """
+        if not isinstance(obj, dict):
+            return None
+
+        action = str(obj.get("action") or "").strip()
+        if action.lower() == "final":
+            return {"action": "final", "final_text": str(obj.get("final_text") or "").strip()}
+
+        if action.lower() == "tool":
+            tool_name = str(obj.get("tool") or "").strip()
+            args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
+            if tool_name:
+                return {"action": "tool", "tool": tool_name, "args": args}
+            return None
+
+        # Shorthand: action is the tool name.
+        if action and action in self._tool_specs_by_name:
+            args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
+            return {"action": "tool", "tool": action, "args": args}
+
+        # Missing action but has tool.
+        tool_name = str(obj.get("tool") or "").strip()
+        if tool_name and tool_name in self._tool_specs_by_name:
+            args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
+            return {"action": "tool", "tool": tool_name, "args": args}
+
+        return None
 
     async def _async_memory_write_tool(self, *, ctx: ConversationContext, args: dict[str, Any]) -> dict[str, Any]:
         text = str(args.get("text", "")).strip()
@@ -565,16 +614,22 @@ class AgenticConversationEntity(ConversationEntity):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             for _step in range(max(1, self._agent_max_steps)):
                 raw = await self._llm.generate(system=system, messages=messages)
-                obj = _extract_first_json_object(raw) or {}
-                action = str(obj.get("action", "")).strip().lower()
+                parsed = _extract_first_json_object(raw) or {}
+                obj = self._normalize_agent_step(parsed)
+                if obj is None:
+                    # Ask the model to correct itself rather than showing tool JSON to the user.
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "Your last response was invalid. Output STRICT JSON only matching one of: {action: tool, tool: name, args:{...}} or {action: final, final_text: ...}.",
+                        }
+                    )
+                    continue
 
+                action = str(obj.get("action") or "").strip().lower()
                 if action == "final":
                     final_text = str(obj.get("final_text") or "").strip()
                     return final_text or "Sorry, I couldn't generate a response."
-
-                if action != "tool":
-                    # If the model violated the schema, fall back to a direct answer.
-                    return (raw or "").strip() or "Sorry, I couldn't generate a response."
 
                 tool_name = str(obj.get("tool") or "").strip()
                 args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
@@ -598,7 +653,7 @@ class AgenticConversationEntity(ConversationEntity):
                         allow_python=self._allow_python,
                         session=session,
                         local_timer_handler=lambda a: self._async_local_timer_tool(
-                            conversation_id=conversation_id, args=a
+                            ctx=ctx, conversation_id=conversation_id, args=a
                         ),
                         memory_write_handler=lambda a: self._async_memory_write_tool(ctx=ctx, args=a),
                     )
@@ -645,7 +700,7 @@ class AgenticConversationEntity(ConversationEntity):
         # If device_id is missing and the request looks like a timer, keep the old heuristic fallback.
         if user_input.device_id is None and _looks_like_timer_request(user_input.text):
             local_timer_response = await self._async_handle_timer_locally(
-                conversation_id=conversation_id, text=user_input.text
+                ctx=ctx, conversation_id=getattr(user_input, "conversation_id", None), text=user_input.text
             )
             if local_timer_response is not None:
                 response_text = local_timer_response
