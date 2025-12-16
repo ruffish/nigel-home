@@ -681,6 +681,11 @@ class AgenticConversationEntity(ConversationEntity):
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Unable to add progress to chat log", exc_info=True)
 
+    def _chat_tool_marker(self, *, chat_log: Any, agent_id: str, tool_name: str) -> None:
+        """Add a tool marker message to the chat log (non-spoken)."""
+        marker = f'TOOL["{tool_name}"]'
+        self._chat_progress(chat_log=chat_log, agent_id=agent_id, text=marker)
+
     async def _async_agent_loop(
         self,
         *,
@@ -769,6 +774,16 @@ class AgenticConversationEntity(ConversationEntity):
                 action = str(obj.get("action") or "").strip().lower()
                 if action == "final":
                     final_text = str(obj.get("final_text") or "").strip()
+                    # Emit a timing summary before returning
+                    timings_ms["total"] = (perf_counter() - t0) * 1000.0
+                    self._fire_timing_event(phase="end", timings_ms=timings_ms, conversation_id=conversation_id)
+                    if self._profile_requests and self._show_agent_actions_in_chat:
+                        total_s = timings_ms.get("total", 0.0) / 1000.0
+                        self._chat_progress(
+                            chat_log=chat_log,
+                            agent_id=agent_id,
+                            text=f"Timing: total {total_s:.2f}s",
+                        )
                     return final_text or "Sorry, I couldn't generate a response."
 
                 tool_name = str(obj.get("tool") or "").strip()
@@ -796,7 +811,7 @@ class AgenticConversationEntity(ConversationEntity):
                     narration=narration,
                     status="started",
                 )
-                self._chat_progress(chat_log=chat_log, agent_id=agent_id, text=narration)
+                self._chat_tool_marker(chat_log=chat_log, agent_id=agent_id, tool_name=tool_name)
                 if narration:
                     await self._async_speak_narration(narration)
 
@@ -850,6 +865,13 @@ class AgenticConversationEntity(ConversationEntity):
         if self._profile_requests:
             _LOGGER.info("Agent timing (ms): %s", {k: round(v, 1) for k, v in timings_ms.items()})
         if tool_trace:
+            if self._profile_requests and self._show_agent_actions_in_chat:
+                total_s = timings_ms.get("total", 0.0) / 1000.0
+                self._chat_progress(
+                    chat_log=chat_log,
+                    agent_id=agent_id,
+                    text=f"Timing: total {total_s:.2f}s",
+                )
             return "I started working on that, but ran out of steps. Try asking again more specifically."
         return "Sorry, I couldn't complete that."
 
