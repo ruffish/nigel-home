@@ -216,6 +216,12 @@ class AgenticConversationEntity(ConversationEntity):
         """Return supported languages."""
         return "*"
 
+    def __getattribute__(self, name: str) -> Any:
+        """Log all method calls to trace what HA is invoking."""
+        if name.startswith("async_") and not name.startswith("async_add"):
+            _LOGGER.warning("Method called: %s", name)
+        return super().__getattribute__(name)
+
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self._entry = entry
@@ -890,6 +896,7 @@ class AgenticConversationEntity(ConversationEntity):
         user_input: ConversationInput,
         chat_log: Any,
     ) -> ConversationResult:
+        _LOGGER.warning("_async_handle_message called: chat_log=%s", type(chat_log).__name__ if chat_log else None)
         conversation_id = getattr(user_input, "conversation_id", None) or "default"
 
         ctx = ConversationContext(
