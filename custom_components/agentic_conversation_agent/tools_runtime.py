@@ -71,6 +71,41 @@ def load_tools_from_dir(tools_dir: str) -> list[ToolSpec]:
 def builtin_tools() -> list[ToolSpec]:
     return [
         ToolSpec(
+            name="ha_list_services",
+            description=(
+                "List available Home Assistant services and their fields. "
+                "Use when you are not sure which domain.service exists or what data fields it accepts."
+            ),
+            type="builtin",
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "domain": {"type": "string", "description": "Optional domain filter (e.g. light)"},
+                    "query": {"type": "string", "description": "Optional substring filter on domain.service"},
+                    "limit": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+            raw={},
+        ),
+        ToolSpec(
+            name="ha_list_entities",
+            description=(
+                "List entities (entity_id + name + state). Use to discover entity_ids to control."
+            ),
+            type="builtin",
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "domain": {"type": "string", "description": "Optional domain filter (e.g. light)"},
+                    "query": {"type": "string", "description": "Optional substring filter on name/entity_id"},
+                    "limit": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+            raw={},
+        ),
+        ToolSpec(
             name="ha_call_service",
             description=(
                 "Call a Home Assistant service. Use for device control, timers (timer.* entities), scripts, etc."
@@ -169,6 +204,71 @@ async def execute_tool(
     memory_write_handler: Any,
 ) -> dict[str, Any]:
     # Built-in tools
+    if tool.name == "ha_list_services":
+        domain_filter = str(args.get("domain") or "").strip().lower() or None
+        query = str(args.get("query") or "").strip().lower() or None
+        limit = int(args.get("limit") or 200)
+        limit = max(1, min(limit, 500))
+
+        services = hass.services.async_services()
+        out: list[dict[str, Any]] = []
+        for domain, svc_map in services.items():
+            if domain_filter and domain.lower() != domain_filter:
+                continue
+            for svc, info in svc_map.items():
+                full = f"{domain}.{svc}".lower()
+                if query and query not in full:
+                    continue
+
+                entry: dict[str, Any] = {"service": f"{domain}.{svc}"}
+                if isinstance(info, dict):
+                    desc = info.get("description")
+                    if isinstance(desc, str) and desc:
+                        entry["description"] = desc
+                    fields = info.get("fields")
+                    if isinstance(fields, dict):
+                        # Only include field names + short descriptions; keep payload small.
+                        entry["fields"] = {
+                            str(k): (
+                                (str(v.get("description")) if isinstance(v, dict) and v.get("description") else "")
+                            )
+                            for k, v in list(fields.items())[:50]
+                        }
+
+                out.append(entry)
+                if len(out) >= limit:
+                    return {"services": out, "truncated": True}
+
+        return {"services": out, "truncated": False}
+
+    if tool.name == "ha_list_entities":
+        domain_filter = str(args.get("domain") or "").strip().lower() or None
+        query = str(args.get("query") or "").strip().lower() or None
+        limit = int(args.get("limit") or 100)
+        limit = max(1, min(limit, 500))
+
+        entities: list[dict[str, Any]] = []
+        for st in hass.states.async_all():
+            if domain_filter and st.domain != domain_filter:
+                continue
+            name = (st.name or "")
+            if query:
+                q = query
+                if q not in st.entity_id.lower() and q not in name.lower():
+                    continue
+            entities.append(
+                {
+                    "entity_id": st.entity_id,
+                    "name": name,
+                    "domain": st.domain,
+                    "state": st.state,
+                }
+            )
+            if len(entities) >= limit:
+                return {"entities": entities, "truncated": True}
+
+        return {"entities": entities, "truncated": False}
+
     if tool.name == "ha_call_service":
         svc = str(args.get("service", ""))
         data = args.get("data") if isinstance(args.get("data"), dict) else {}

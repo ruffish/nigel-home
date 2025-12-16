@@ -70,6 +70,10 @@ AGENT_PROMPT = """You are Nigel, a Home Assistant voice assistant.
 
 You can call tools to control the home and fetch state.
 
+Important:
+- NEVER delegate to Home Assistant's DefaultAgent or built-in conversation agent.
+- All actions must be performed by calling tools.
+
 Tool calling rules:
 - Output MUST be STRICT JSON only (no markdown, no extra text).
 - Choose exactly one action per step.
@@ -83,6 +87,8 @@ Valid outputs:
 { "action": "final", "final_text": "..." }
 
 Guidance:
+- If you are unsure what service exists or which fields it needs, call ha_list_services.
+- If you are unsure what entity_id to control, call ha_list_entities or ha_find_entities.
 - For device control use ha_call_service or a matching ha_service tool.
 - To find an entity_id, use ha_find_entities; then ha_get_state.
 - For timers when the client device_id is missing, use local_timer.
@@ -586,24 +592,8 @@ class AgenticConversationEntity(ConversationEntity):
                 user_text=user_input.text,
             )
         except Exception as err:  # noqa: BLE001
-            _LOGGER.exception("Agent loop failed; falling back to HA DefaultAgent")
-            try:
-                from homeassistant.components.conversation.default_agent import DefaultAgent
-
-                domain_data = self.hass.data.setdefault(DOMAIN, {})
-                default_agent = domain_data.get("_ha_default_agent")
-                if default_agent is None:
-                    default_agent = DefaultAgent(self.hass)
-                    domain_data["_ha_default_agent"] = default_agent
-
-                result = await default_agent._async_handle_message(user_input, chat_log)
-                try:
-                    response_text = result.response.speech.get("plain", {}).get("speech", "")
-                except Exception:
-                    response_text = ""
-                response_text = response_text.strip() or f"Sorry, I couldn't complete that: {err}"
-            except Exception:
-                response_text = f"Sorry, I couldn't complete that: {err}"
+            _LOGGER.exception("Agent loop failed")
+            response_text = f"Sorry, I couldn't complete that: {err}"
 
         response_text = response_text.strip() or "Sorry, I couldn't generate a response."
 
