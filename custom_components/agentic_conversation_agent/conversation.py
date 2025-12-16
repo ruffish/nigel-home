@@ -55,15 +55,16 @@ class AgenticConversationEntity(ConversationEntity):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self._entry = entry
-        self._attr_name = entry.data.get("name") or "Agentic Conversation Agent"
+        cfg = {**entry.data, **entry.options}
+        self._attr_name = cfg.get("name") or "Agentic Conversation Agent"
         self._attr_unique_id = f"{entry.entry_id}"
 
         # LLM configuration
         self._llm_config = LLMConfig(
-            provider=str(entry.data.get(CONF_LLM_PROVIDER, "google")),
-            model=str(entry.data.get(CONF_LLM_MODEL, "gemini-1.5-flash")),
-            api_key=str(entry.data.get(CONF_LLM_API_KEY, "")),
-            base_url=entry.data.get(CONF_LLM_BASE_URL) or None,
+            provider=str(cfg.get(CONF_LLM_PROVIDER, "google")),
+            model=str(cfg.get(CONF_LLM_MODEL, "gemini-1.5-flash")),
+            api_key=str(cfg.get(CONF_LLM_API_KEY, "")),
+            base_url=cfg.get(CONF_LLM_BASE_URL) or None,
         )
         self._llm = LLMClient(self._llm_config)
 
