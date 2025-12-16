@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import logging
 import json
+import re
+import time
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -89,6 +92,60 @@ def _extract_first_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+_DURATION_PART_RE = re.compile(
+    r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_duration_seconds(text: str) -> int | None:
+    """Parse durations like '5 minutes', '1h 30m', '90 seconds' into seconds."""
+    if not text:
+        return None
+
+    total = 0.0
+    found = False
+    for match in _DURATION_PART_RE.finditer(text):
+        found = True
+        value = float(match.group("value"))
+        unit = match.group("unit").lower()
+        if unit.startswith("h"):
+            total += value * 3600
+        elif unit.startswith("m"):
+            total += value * 60
+        else:
+            total += value
+
+    if not found:
+        return None
+
+    seconds = int(round(total))
+    return seconds if seconds > 0 else None
+
+
+def _looks_like_timer_request(text: str) -> bool:
+    t = (text or "").lower()
+    return "timer" in t
+
+
+def _timer_intent_kind(text: str) -> str | None:
+    """Heuristic classification for simple timer operations."""
+    t = (text or "").lower().strip()
+    if not t:
+        return None
+
+    if any(k in t for k in ("cancel", "stop", "delete", "remove")) and "timer" in t:
+        return "cancel"
+
+    if "timer" in t and any(k in t for k in ("how long", "time left", "remaining", "left")):
+        return "remaining"
+
+    if "timer" in t and any(k in t for k in ("start", "set", "begin", "create")):
+        return "start"
+
+    return None
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -125,6 +182,85 @@ class AgenticConversationEntity(ConversationEntity):
         # Simple conversation history (in-memory)
         self._history: dict[str, list[dict[str, str]]] = {}
 
+        # Simple in-integration timers (for clients that don't provide a device_id).
+        # Keyed by conversation_id.
+        self._timers: dict[str, dict[str, float]] = {}
+
+    async def _async_timer_finished(self, *, conversation_id: str, ends_at: float) -> None:
+        delay = max(0.0, ends_at - time.time())
+        await asyncio.sleep(delay)
+
+        timer = self._timers.get(conversation_id)
+        if not timer or timer.get("ends_at") != ends_at:
+            return
+
+        # Mark as finished but keep record so "time left" can answer.
+        timer["finished"] = 1.0
+        try:
+            from homeassistant.components import persistent_notification
+
+            persistent_notification.async_create(
+                self.hass,
+                "Timer finished.",
+                title="Assist Timer",
+                notification_id=f"{DOMAIN}_{conversation_id}_timer",
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Unable to create persistent notification for timer", exc_info=True)
+
+    async def _async_handle_timer_locally(
+        self, *, conversation_id: str, text: str
+    ) -> str | None:
+        kind = _timer_intent_kind(text)
+        if kind is None:
+            return None
+
+        if kind == "cancel":
+            if conversation_id in self._timers:
+                self._timers.pop(conversation_id, None)
+                return "Okay, canceled your timer."
+            return "You don't have an active timer."
+
+        if kind == "remaining":
+            timer = self._timers.get(conversation_id)
+            if not timer:
+                return "You don't have an active timer."
+
+            ends_at = float(timer.get("ends_at", 0.0))
+            remaining = int(round(ends_at - time.time()))
+            if remaining <= 0:
+                return "Your timer is done."
+
+            mins, secs = divmod(remaining, 60)
+            if mins > 0:
+                return f"You have {mins} minute(s) and {secs} second(s) left on your timer."
+            return f"You have {secs} second(s) left on your timer."
+
+        if kind == "start":
+            seconds = _parse_duration_seconds(text)
+            if seconds is None:
+                return "How long should I set the timer for?"
+
+            now = time.time()
+            ends_at = now + seconds
+            self._timers[conversation_id] = {
+                "started_at": now,
+                "ends_at": ends_at,
+                "seconds": float(seconds),
+            }
+            self.hass.async_create_task(
+                self._async_timer_finished(conversation_id=conversation_id, ends_at=ends_at)
+            )
+
+            mins, secs = divmod(seconds, 60)
+            if mins > 0 and secs:
+                return f"Okay, starting a timer for {mins} minute(s) and {secs} second(s)."
+            if mins > 0:
+                return f"Okay, starting a timer for {mins} minute(s)."
+            return f"Okay, starting a timer for {secs} second(s)."
+
+        return None
+
     async def _async_handle_message(
         self,
         user_input: ConversationInput,
@@ -157,6 +293,22 @@ class AgenticConversationEntity(ConversationEntity):
         action = str(router.get("action", "")).strip().lower()
 
         if action == "hass":
+            # Local fallback for timers when the client doesn't provide a device_id.
+            # The built-in timer intent expects a device that supports timers.
+            if user_input.device_id is None and _looks_like_timer_request(user_input.text):
+                local_timer_response = await self._async_handle_timer_locally(
+                    conversation_id=conversation_id, text=user_input.text
+                )
+                if local_timer_response is not None:
+                    response_text = local_timer_response
+                    response = IntentResponse(language=user_input.language)
+                    response.async_set_speech(response_text)
+                    return ConversationResult(
+                        conversation_id=conversation_id,
+                        response=response,
+                        continue_conversation=False,
+                    )
+
             try:
                 from homeassistant.components.conversation.default_agent import DefaultAgent
 

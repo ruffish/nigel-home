@@ -1,7 +1,7 @@
 {
   "domain": "agentic_conversation_agent",
   "name": "Agentic Conversation Agent",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "documentation": "https://github.com/ruffish/nigel-home",
   "issue_tracker": "https://github.com/ruffish/nigel-home/issues",
   "codeowners": ["@ruffish"],
