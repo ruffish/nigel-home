@@ -75,7 +75,15 @@ class AgenticConversationAgentOptionsFlowHandler(config_entries.OptionsFlow):
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
-        self.config_entry = config_entry
+        # In newer Home Assistant versions, OptionsFlow may expose `config_entry`
+        # as a read-only property. Avoid assigning to it.
+        self._config_entry = config_entry
+
+    @property
+    def _entry(self) -> config_entries.ConfigEntry:
+        """Return the current config entry."""
+        # Prefer HA-provided property if present.
+        return getattr(self, "config_entry", self._config_entry)
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Manage the options."""
@@ -83,21 +91,21 @@ class AgenticConversationAgentOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
 
         # Get current values from options, falling back to data (for migration/initial setup)
-        current_provider = self.config_entry.options.get(
+        current_provider = self._entry.options.get(
             CONF_LLM_PROVIDER,
-            self.config_entry.data.get(CONF_LLM_PROVIDER, DEFAULT_LLM_PROVIDER)
+            self._entry.data.get(CONF_LLM_PROVIDER, DEFAULT_LLM_PROVIDER)
         )
-        current_model = self.config_entry.options.get(
+        current_model = self._entry.options.get(
             CONF_LLM_MODEL,
-            self.config_entry.data.get(CONF_LLM_MODEL, DEFAULT_LLM_MODEL)
+            self._entry.data.get(CONF_LLM_MODEL, DEFAULT_LLM_MODEL)
         )
-        current_api_key = self.config_entry.options.get(
+        current_api_key = self._entry.options.get(
             CONF_LLM_API_KEY,
-            self.config_entry.data.get(CONF_LLM_API_KEY, "")
+            self._entry.data.get(CONF_LLM_API_KEY, "")
         )
-        current_base_url = self.config_entry.options.get(
+        current_base_url = self._entry.options.get(
             CONF_LLM_BASE_URL,
-            self.config_entry.data.get(CONF_LLM_BASE_URL, "")
+            self._entry.data.get(CONF_LLM_BASE_URL, "")
         )
 
         schema = vol.Schema(
