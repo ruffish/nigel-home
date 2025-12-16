@@ -4,6 +4,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
+from homeassistant.core import callback
 
 from .const import (
     CONF_LLM_API_KEY,
@@ -19,6 +20,14 @@ from .const import (
 
 class AgenticConversationAgentConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 2
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Create the options flow."""
+        return AgenticConversationAgentOptionsFlowHandler(config_entry)
 
     async def async_step_user(self, user_input=None):
         if self._async_current_entries():
@@ -53,3 +62,51 @@ class AgenticConversationAgentConfigFlow(config_entries.ConfigFlow, domain=DOMAI
         )
 
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
+
+class AgenticConversationAgentOptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize options flow."""
+        self.config_entry = config_entry
+
+    async def async_step_init(self, user_input=None):
+        """Manage the options."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_LLM_PROVIDER,
+                    default=self.config_entry.options.get(
+                        CONF_LLM_PROVIDER,
+                        self.config_entry.data.get(CONF_LLM_PROVIDER, DEFAULT_LLM_PROVIDER),
+                    ),
+                ): vol.In(LLM_PROVIDERS),
+                vol.Required(
+                    CONF_LLM_MODEL,
+                    default=self.config_entry.options.get(
+                        CONF_LLM_MODEL,
+                        self.config_entry.data.get(CONF_LLM_MODEL, DEFAULT_LLM_MODEL),
+                    ),
+                ): str,
+                vol.Required(
+                    CONF_LLM_API_KEY,
+                    default=self.config_entry.options.get(
+                        CONF_LLM_API_KEY,
+                        self.config_entry.data.get(CONF_LLM_API_KEY, ""),
+                    ),
+                ): str,
+                vol.Optional(
+                    CONF_LLM_BASE_URL,
+                    default=self.config_entry.options.get(
+                        CONF_LLM_BASE_URL,
+                        self.config_entry.data.get(CONF_LLM_BASE_URL, ""),
+                    ),
+                ): str,
+            }
+        )
+
+        return self.async_show_form(step_id="init", data_schema=schema)
