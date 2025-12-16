@@ -1,7 +1,7 @@
 {
   "domain": "agentic_conversation_agent",
   "name": "Agentic Conversation Agent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "documentation": "https://github.com/ruffish/nigel-home",
   "issue_tracker": "https://github.com/ruffish/nigel-home/issues",
   "codeowners": ["@ruffish"],
@@ -10,5 +10,5 @@
   "iot_class": "cloud_polling",
   "dependencies": ["conversation"],
   "platforms": ["conversation"],
-  "requirements": ["google-generativeai==0.8.3", "openai==1.57.3"]
+  "requirements": []
 }

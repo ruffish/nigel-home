@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
+
+import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,12 +32,8 @@ class LLMClient:
         raise ValueError(f"Unknown LLM provider: {provider}")
 
     async def _google_generate(self, *, system: str, messages: list[dict[str, str]]) -> str:
-        try:
-            import google.generativeai as genai
-        except ImportError as err:
-            raise RuntimeError("google-generativeai package not installed") from err
-
-        # Flatten messages into a prompt
+        """Call Google Gemini API directly via HTTP."""
+        # Build the prompt from messages
         parts: list[str] = []
         for msg in messages:
             role = msg.get("role", "")
@@ -47,35 +44,83 @@ class LLMClient:
                 parts.append(f"Assistant: {content}")
             else:
                 parts.append(content)
-        prompt = "\n".join(parts)
+        user_prompt = "\n".join(parts)
 
-        def _do() -> str:
-            genai.configure(api_key=self._config.api_key)
-            model = genai.GenerativeModel(self._config.model, system_instruction=system)
-            resp = model.generate_content(prompt)
-            return getattr(resp, "text", "") or ""
+        # Google Gemini API endpoint
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._config.model}:generateContent"
 
-        return await asyncio.to_thread(_do)
+        payload = {
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "systemInstruction": {"parts": [{"text": system}]},
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 1024,
+            },
+        }
+
+        headers = {"Content-Type": "application/json"}
+        params = {"key": self._config.api_key}
+
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, headers=headers, params=params) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    _LOGGER.error("Google API error (%s): %s", resp.status, error_text)
+                    raise RuntimeError(f"Google API error ({resp.status}): {error_text[:200]}")
+
+                data = await resp.json()
+
+        # Extract text from response
+        try:
+            candidates = data.get("candidates", [])
+            if candidates:
+                content = candidates[0].get("content", {})
+                parts = content.get("parts", [])
+                if parts:
+                    return str(parts[0].get("text", ""))
+        except Exception as err:
+            _LOGGER.error("Failed to parse Google response: %s", err)
+
+        return ""
 
     async def _openai_generate(self, *, system: str, messages: list[dict[str, str]]) -> str:
-        try:
-            from openai import OpenAI
-        except ImportError as err:
-            raise RuntimeError("openai package not installed") from err
+        """Call OpenAI-compatible API directly via HTTP."""
+        base_url = self._config.base_url or "https://api.openai.com/v1"
+        url = f"{base_url.rstrip('/')}/chat/completions"
 
         req_messages: list[dict[str, str]] = [{"role": "system", "content": system}]
         req_messages.extend(messages)
 
-        def _do() -> str:
-            client = OpenAI(
-                api_key=self._config.api_key,
-                base_url=self._config.base_url if self._config.base_url else None,
-            )
-            resp = client.chat.completions.create(
-                model=self._config.model,
-                messages=req_messages,  # type: ignore[arg-type]
-                temperature=0.7,
-            )
-            return resp.choices[0].message.content or ""
+        payload = {
+            "model": self._config.model,
+            "messages": req_messages,
+            "temperature": 0.7,
+            "max_tokens": 1024,
+        }
 
-        return await asyncio.to_thread(_do)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._config.api_key}",
+        }
+
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    _LOGGER.error("OpenAI API error (%s): %s", resp.status, error_text)
+                    raise RuntimeError(f"OpenAI API error ({resp.status}): {error_text[:200]}")
+
+                data = await resp.json()
+
+        # Extract text from response
+        try:
+            choices = data.get("choices", [])
+            if choices:
+                message = choices[0].get("message", {})
+                return str(message.get("content", ""))
+        except Exception as err:
+            _LOGGER.error("Failed to parse OpenAI response: %s", err)
+
+        return ""
