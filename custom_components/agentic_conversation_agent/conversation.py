@@ -714,11 +714,43 @@ class AgenticConversationEntity(ConversationEntity):
 
         # Primary path: agent loop (tools + memory)
         try:
-            response_text = await self._async_agent_loop(
-                ctx=ctx,
-                conversation_id=conversation_id,
-                user_text=user_input.text,
-            )
+            # If provider is github_copilot and a base_url is provided,
+            # delegate to the add-on's HTTP API instead of running locally.
+            if (
+                (self._llm_config.provider or "").lower() == "github_copilot"
+                and (self._llm_config.base_url or "").strip()
+            ):
+                import aiohttp
+
+                base = str(self._llm_config.base_url).rstrip("/")
+                url = f"{base}/converse"
+                headers = {"Content-Type": "application/json"}
+                # Reuse llm_api_key as X-API-Key for the add-on if set.
+                if self._llm_config.api_key:
+                    headers["X-API-Key"] = self._llm_config.api_key
+
+                payload = {
+                    "text": user_input.text,
+                    "conversation_id": conversation_id,
+                    "language": getattr(user_input, "language", None),
+                    "device_id": getattr(user_input, "device_id", None),
+                    "user_id": getattr(getattr(user_input, "context", None), "user_id", None),
+                }
+
+                timeout = aiohttp.ClientTimeout(total=60)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(url, json=payload, headers=headers) as resp:
+                        if resp.status != 200:
+                            text = await resp.text()
+                            raise RuntimeError(f"Add-on API error ({resp.status}): {text[:200]}")
+                        data = await resp.json()
+                        response_text = str(data.get("text", "") or "Sorry, I couldn't generate a response.")
+            else:
+                response_text = await self._async_agent_loop(
+                    ctx=ctx,
+                    conversation_id=conversation_id,
+                    user_text=user_input.text,
+                )
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Agent loop failed")
             response_text = f"Sorry, I couldn't complete that: {err}"
