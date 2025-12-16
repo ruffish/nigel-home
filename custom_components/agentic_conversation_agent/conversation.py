@@ -706,14 +706,14 @@ class AgenticConversationEntity(ConversationEntity):
         user_text: str,
         chat_log: Any,
         agent_id: str,
-    ) -> str:
+    ) -> tuple[str, list[str]]:
+        """Run agent loop and return (final_text, action_log)."""
         # Debug: confirm chat_log is passed
         _LOGGER.info("AGENT LOOP START: chat_log=%s, agent_id=%s, show_actions=%s", 
                      type(chat_log).__name__ if chat_log else None, agent_id, self._show_agent_actions_in_chat)
         
-        # Push an early progress message so the user sees something even if we are slow
-        self._chat_progress(chat_log=chat_log, agent_id=agent_id, text="Working on that…")
-
+        action_log: list[str] = []  # Track all tool calls for display
+        
         t0 = perf_counter()
         timings_ms: dict[str, float] = {}
 
@@ -793,14 +793,10 @@ class AgenticConversationEntity(ConversationEntity):
                     # Emit a timing summary before returning
                     timings_ms["total"] = (perf_counter() - t0) * 1000.0
                     self._fire_timing_event(phase="end", timings_ms=timings_ms, conversation_id=conversation_id)
-                    if self._profile_requests and self._show_agent_actions_in_chat:
+                    if self._profile_requests:
                         total_s = timings_ms.get("total", 0.0) / 1000.0
-                        self._chat_progress(
-                            chat_log=chat_log,
-                            agent_id=agent_id,
-                            text=f"Timing: total {total_s:.2f}s",
-                        )
-                    return final_text or "Sorry, I couldn't generate a response."
+                        action_log.append(f"⏱️ {total_s:.2f}s")
+                    return final_text or "Sorry, I couldn't generate a response.", action_log
 
                 tool_name = str(obj.get("tool") or "").strip()
                 args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
@@ -827,7 +823,11 @@ class AgenticConversationEntity(ConversationEntity):
                     narration=narration,
                     status="started",
                 )
-                self._chat_tool_marker(chat_log=chat_log, agent_id=agent_id, tool_name=tool_name)
+                
+                # Add to action log for chat display
+                action_log.append(f'TOOL["{tool_name}"]')
+                
+                # Speak narration in voice mode
                 if narration:
                     await self._async_speak_narration(narration)
 
@@ -880,16 +880,11 @@ class AgenticConversationEntity(ConversationEntity):
         self._fire_timing_event(phase="end", timings_ms=timings_ms, conversation_id=conversation_id)
         if self._profile_requests:
             _LOGGER.info("Agent timing (ms): %s", {k: round(v, 1) for k, v in timings_ms.items()})
+            total_s = timings_ms.get("total", 0.0) / 1000.0
+            action_log.append(f"⏱️ {total_s:.2f}s")
         if tool_trace:
-            if self._profile_requests and self._show_agent_actions_in_chat:
-                total_s = timings_ms.get("total", 0.0) / 1000.0
-                self._chat_progress(
-                    chat_log=chat_log,
-                    agent_id=agent_id,
-                    text=f"Timing: total {total_s:.2f}s",
-                )
-            return "I started working on that, but ran out of steps. Try asking again more specifically."
-        return "Sorry, I couldn't complete that."
+            return "I started working on that, but ran out of steps. Try asking again more specifically.", action_log
+        return "Sorry, I couldn't complete that.", action_log
 
     async def _async_handle_message(
         self,
@@ -931,7 +926,7 @@ class AgenticConversationEntity(ConversationEntity):
 
         # Primary path: agent loop (tools + memory)
         try:
-            response_text = await self._async_agent_loop(
+            response_text, action_log = await self._async_agent_loop(
                 ctx=ctx,
                 conversation_id=conversation_id,
                 user_text=user_input.text,
@@ -941,8 +936,15 @@ class AgenticConversationEntity(ConversationEntity):
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Agent loop failed")
             response_text = f"Sorry, I couldn't complete that: {err}"
+            action_log = []
 
         response_text = response_text.strip() or "Sorry, I couldn't generate a response."
+        
+        # Build visible chat response with tool markers if enabled
+        if self._show_agent_actions_in_chat and action_log:
+            chat_text = "\n".join(action_log) + "\n\n" + response_text
+        else:
+            chat_text = response_text
 
         # Persist assistant response into buffer
         try:
@@ -950,18 +952,18 @@ class AgenticConversationEntity(ConversationEntity):
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Failed writing buffer", exc_info=True)
 
-        # Add to chat log
+        # Add to chat log (use chat_text with tool markers if available)
         try:
             from homeassistant.components.conversation.chat_log import AssistantContent
 
             chat_log.async_add_assistant_content_without_tools(
-                AssistantContent(agent_id=user_input.agent_id, content=response_text)
+                AssistantContent(agent_id=user_input.agent_id, content=chat_text)
             )
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Unable to add to chat log", exc_info=True)
 
         response = IntentResponse(language=user_input.language)
-        response.async_set_speech(response_text)
+        response.async_set_speech(response_text)  # Speech uses clean text without tool markers
 
         return ConversationResult(
             conversation_id=conversation_id,
