@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers import intent as ha_intent
 
 try:
     # Home Assistant 2024+ (and current) location
@@ -81,6 +82,33 @@ class AgenticConversationEntity(ConversationEntity):
         user_input: ConversationInput,
         chat_log: Any,
     ) -> ConversationResult:
+        # 1) Prefer Home Assistant's built-in intent engine for device control.
+        # This keeps timers/lights/etc working the same as the default Assist agent.
+        try:
+            from homeassistant.components.conversation.default_agent import DefaultAgent
+
+            domain_data = self.hass.data.setdefault(DOMAIN, {})
+            default_agent = domain_data.get("_ha_default_agent")
+            if default_agent is None:
+                default_agent = DefaultAgent(self.hass)
+                domain_data["_ha_default_agent"] = default_agent
+
+            intent_result = await default_agent._async_handle_message(user_input, chat_log)
+            # If the default agent couldn't match any intent, fall back to the LLM.
+            if (
+                intent_result is not None
+                and intent_result.response is not None
+                and not (
+                    getattr(intent_result.response, "response_type", None)
+                    == ha_intent.IntentResponseType.ERROR
+                    and getattr(intent_result.response, "error_code", None)
+                    == ha_intent.IntentResponseErrorCode.NO_INTENT_MATCH
+                )
+            ):
+                return intent_result
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Default agent handling failed; falling back to LLM", exc_info=True)
+
         conversation_id = getattr(user_input, "conversation_id", None) or "default"
 
         # Get or create conversation history
