@@ -10,12 +10,17 @@ RUN apk add --no-cache \
       python3 \
       py3-pip \
       ca-certificates \
-      curl
+      curl \
+      nodejs \
+      npm
 
 WORKDIR /app
 
 COPY rootfs/ /
 
 RUN pip3 install --no-cache-dir -r /app/requirements.txt
+
+# Install GitHub Copilot CLI for LLM requests
+RUN npm install -g @githubnext/github-copilot-cli
 
 # s6 overlay will start /etc/services.d/*/run
