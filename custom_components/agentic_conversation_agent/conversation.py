@@ -34,13 +34,14 @@ async def async_setup_entry(
 
 
 class AgenticConversationEntity(ConversationEntity):
-    _attr_supported_languages = ["*"]
+    _attr_supported_languages = "*"
     _attr_supported_features = ConversationEntityFeature.CONTROL
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self._entry = entry
         self._attr_name = entry.data.get("name") or "Agentic Conversation Agent"
+        self._attr_unique_id = f"{entry.entry_id}"
         self._base_url = str(entry.data.get(CONF_BASE_URL) or "")
         self._api_key = str(entry.data.get(CONF_API_KEY) or "")
         self._timeout = int(entry.data.get(CONF_TIMEOUT) or 30)
